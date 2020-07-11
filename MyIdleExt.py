@@ -2,11 +2,23 @@
 import re
 import os
 import sys
+import textwrap
 import string
 import tkinter
 import tkinter.messagebox
+import tkinter.ttk
 import tempfile
+import ast
+import inspect
+from code import InteractiveInterpreter
 from idlelib.configHandler import idleConf
+
+try:
+    from idlelib.editor import EditorWindow
+except ImportError:
+    from idlelib.EditorWindow import EditorWindow
+
+# from typing import *
 
 try:
     import autopep8
@@ -48,6 +60,23 @@ def every_two(iterable):
 def include(index_range, target):
     start, end = index_range
     return split_index(start) <= split_index(target) < split_index(end)
+
+
+def is_escape(string):
+    if len(string) == 0:
+        return False
+    elif len(string) == 1:
+        return string == '\\'
+    else:
+        if string[-1] != '\\':
+            return False
+        backslash_count = 0
+        for char in reversed(string[:-1]):
+            if char == '\\':
+                backslash_count += 1
+            else:
+                break
+        return backslash_count % 2 == 0
 
 
 class TextIndex:
@@ -121,6 +150,14 @@ class TextIndex:
     def __ge__(self, other):
         return self > other or self == other
 
+    @property
+    def line_start(self):
+        return join_index(self.row, 0)
+
+    @property
+    def line_end(self):
+        return join_index(self.row, 'end')
+
 
 class MyIdleExt:
     # any_bracket_pattern = re.compile(r"(\(|\{|\[|\)|\}|\])")
@@ -145,7 +182,7 @@ class MyIdleExt:
         ])
     ]
 
-    def __init__(self, editwin):
+    def __init__(self, editwin: EditorWindow):
         self.window = editwin
         self.text = editwin.text
         self.bell = self.text.bell
@@ -165,9 +202,17 @@ class MyIdleExt:
         self.text.bind('<<format-pep8>>', self.format_pep8)
         self.text.bind(idleConf.GetOption('extensions', 'MyIdleExt_cfgBindings', 'format-pep8'), self.format_pep8)
 
+        self.text.bind('<Key-.>', self.handle_dot)
+
+        # self.code_parser = CodeParser(editwin.text.get('1.0', 'end'))
+        self.completion = CodeCompletionWindow(self, editwin.top)
+
+        self.text.bind('<Tab>', self.open_completion)
+
     def expand_brackets_or_quotes(self, event):
         open_bracket = event.char
         close_bracket = self.close_brackets[event.char]
+
         try:
             # 选中了一些文本，现在用括号（或引号）将它们括起来
             self.wrap_selection_with(open_bracket, close_bracket)
@@ -235,8 +280,8 @@ class MyIdleExt:
             return
 
         if quote == quote_type and len(quote_type) == 1:
-            two_chars_before = self.text.get(cursor - 2, cursor)
-            if len(two_chars_before) >= 2 and two_chars_before[1] == '\\' and two_chars_before[0] != '\\':
+            chars_before = self.text.get(cursor.line_start, cursor)
+            if is_escape(chars_before):
                 return  # 该引号已被转义
 
             if quote == next_char:
@@ -370,6 +415,410 @@ class MyIdleExt:
         except Exception:
             import traceback
             traceback.print_exc()
+
+    def handle_dot(self, event):
+        cursor = self.get_cursor()
+        if self.position_in_tags(cursor):
+            return
+        code = self.text.get('1.0', cursor)
+        expr_string = self.get_expr(code)
+        try:
+            expr = ast.parse(expr_string).body[0].value
+        except SyntaxError:
+            return
+        self.open_completion()
+
+    @staticmethod
+    def get_expr(code):
+        open_brackets = {
+            '(': ')',
+            '[': ']',
+            '{': '}'
+        }
+        close_brackets = {
+            ')': '(',
+            ']': '[',
+            '}': '{'
+        }
+
+        stack = []
+        string_quote = None
+        start_index = len(code) - 1
+        for start_index in range(len(code) - 1, -1, -1):
+            char = code[start_index]
+            if string_quote is None:
+                if char in close_brackets.values():
+                    stack.append(char)
+
+                elif char in open_brackets.values():
+                    if len(stack) >= 1:
+                        from_stack = stack[-1]
+                        if char == close_brackets[from_stack]:
+                            stack.pop()
+                        else:
+                            start_index = min(start_index + 1, len(code) - 1)
+                            break
+                    else:
+                        break
+
+                elif char in ('"', "'"):
+                    if code[start_index:start_index + 3] == char * 3:
+                        string_quote = char * 3
+                    else:
+                        string_quote = char
+
+            else:
+                if char == string_quote and not is_escape(code[:start_index]):
+                    string_quote = None
+
+                if (char in string_quote and code[start_index:start_index + 3] == string_quote
+                        and not is_escape(code[:start_index])):
+                    string_quote = None
+
+        if string_quote is not None or len(stack) != 0:
+            return ''
+
+        return code[start_index:].strip(':, ')
+
+    def get_suggests(self, expr=None):
+        code = self.text.get('1.0', 'end')
+        parser = CodeParser(code)
+        parser.parse_as_more_as_possible(self.get_cursor().row)
+        parser.prepare()
+        return parser.get_suggests()
+
+    def open_completion(self, event=None):
+        self.completion.suggests = self.get_suggests()
+        self.completion.activate()
+        return 'break'
+
+    # def get_suggests(self, name: str):
+    #     if name.startswith('.'):
+    #         # NotImplemented
+    #         return
+    #     self.code_parser.update(self.text.get('1.0', 'end'))
+    #     object_name, pattern = name.rsplit('.', 1)
+    #     self.code_parser.interpreter.runcode('__result__ = ' + object_name)
+    #     obj = self.code_parser.interpreter.locals['__result__']
+    #     attrs = dir(obj)
+    #     pattern = re.compile(r'\w*'.join(pattern))
+    #     possible_names = [attr for attr in attrs if pattern.match(attr)]
+    #     return possible_names
+
+    # def handle_dot(self, event):
+    #     cursor = self.get_cursor()
+    #     if self.position_in_tags(cursor):
+    #         return
+    #
+    #     this_line = self.text.get(join_index(cursor.row, '0'), join_index(cursor.row, 'end'))
+    #
+    #     pattern = re.compile(r"""
+    #     \.?
+    #     (?:\w(?<![0-9]) \w* \.)*
+    #     (?:\w(?<![0-9]) \w*)?""", re.VERBOSE)
+    #
+    #     start = 0
+    #     while start < len(this_line):
+    #         match = pattern.search(this_line, start)
+    #         if match is not None:
+    #             left, right = match.span()
+    #             if left <= cursor <= right:
+    #                 break
+    #         start = match.span()[1]
+    #     else:
+    #         return
+    #
+    #     suggests = self.get_suggests(match.group())
+    #     if len(suggests) == 0:
+    #         return
+    #     else:
+    #         suggests.sort()
+
+
+class CodeParser:
+    def __init__(self, code):
+        self.code = code
+        self.tree = self.parse_as_more_as_possible()
+        self.imports = []
+        self.fromimports = []
+
+    def parse_as_more_as_possible(self, end_lineno=None):
+        code = self.code
+        code_lines = code.splitlines()
+        end_lineno = len(code_lines) if end_lineno is None else end_lineno
+        while True:
+            try:
+                tree = ast.parse('\n'.join(code_lines[:end_lineno]))
+            except SyntaxError as syntax_error:
+                end_lineno = syntax_error.lineno - 1
+            else:
+                break
+        return tree
+
+    def prepare(self):
+        parser = self
+
+        class Visitor(ast.NodeVisitor):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+
+            def visit_Import(self, node):
+                parser.imports.append(node)
+
+            def visit_ImportFrom(self, node):
+                parser.fromimports.append(node)
+
+        Visitor().visit(self.tree)
+
+    def find_name(self, target, lineno=None):
+        if lineno is None:
+            lineno = self.code.count('\n')
+
+        # Search in imports and fromimports
+        for import_ in reversed(self.imports):
+            if import_.lineno > lineno:
+                continue
+
+            for target in import_.names:
+                import_name = target.asname or target.name
+                if import_name == target:
+                    return 'import', target.name
+
+        for fromimport in reversed(self.fromimports):
+            if fromimport.lineno > lineno:
+                continue
+
+            for target in fromimport.names:
+                import_name = target.asname or target.name
+                if import_name == target:
+                    return 'from', fromimport.module, target.name
+
+        # Search others
+        parser = self
+
+        class Visitor(ast.NodeVisitor):
+            def __init__(self):
+                self.result = None
+
+            def visit_FunctionDef(self, node):
+                if node.name == target:
+                    self.result = 'func', node
+
+            def visit_Assign(self, node):
+                if node.name == target:
+                    self.result = 'var', node
+
+        visitor = Visitor()
+        visitor.visit(self.tree)
+        result = visitor.result
+        return result
+
+    @staticmethod
+    def get_return_type(func):
+        if isinstance(func, type):
+            return func
+        elif callable(func):
+            try:
+                return inspect.signature(func).return_annotation
+            except ValueError:
+                return None
+        else:
+            return None
+
+    def get_words(self):
+        parser = self
+
+        class Visitor(ast.NodeVisitor):
+            def __init__(self):
+                self.results = set()
+
+            def visit_FunctionDef(self, node):
+                self.results.add(node.name)
+                self.results.update(node.args.args)
+                self.results.update(node.args.kwonlyargs)
+                self.results.add(node.args.vararg)
+                self.results.add(node.args.kwarg)
+
+            def visit_Lambda(self, node):
+                self.results.add(node.name)
+                self.results.update(node.args.args)
+                self.results.update(node.args.kwonlyargs)
+                self.results.add(node.args.vararg)
+                self.results.add(node.args.kwarg)
+
+            def visit_ClassDef(self, node):
+                self.results.add(node.name)
+
+            def visit_Assign(self, node):
+                self.parse_targets(node.targets)
+
+            def visit_With(self, node):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        self.parse_targets([item.optional_vars])
+
+            def visit_For(self, node):
+                self.parse_targets([node.target])
+
+            def visit_Import(self, node):
+                for name in node.names:
+                    self.results.add(name.asname or name.name)
+
+            def visit_ImportFrom(self, node):
+                for name in node.names:
+                    self.results.add(name.asname or name.name)
+
+            def visit_ExceptHandler(self, node):
+                self.results.add(node.name)
+
+            def parse_targets(self, targets):
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        self.results.add(target.id)
+                    elif isinstance(target, ast.Tuple):
+                        self.parse_targets(target.elts)
+
+
+        visitor = Visitor()
+        visitor.visit(self.tree)
+        results = visitor.results
+
+        if None in results:
+            results.remove(None)
+
+        return results
+
+    def get_suggests(self, expr=None):
+        return [(word, 'abc') for word in self.get_words()]
+
+
+class CodeCompletionWindow:
+    def __init__(self, parent: MyIdleExt, master=None):
+        self.parent = parent
+        self.window = tkinter.Toplevel(master)
+        self.window.overrideredirect(True)
+        self.window.withdraw()
+        self.completion_list = tkinter.ttk.Treeview(
+            self.window,
+            columns=['name', 'type'],
+            show='headings'
+        )
+        self.completion_list.column('type')
+        self.completion_list.pack(side='left', fill='both')
+        self.scrollbar = tkinter.ttk.Scrollbar(self.window, command=self.completion_list.yview)
+        self.completion_list['yscrollcommand'] = self.scrollbar.set
+        self.scrollbar.pack(side='right', fill='y')
+
+        self.is_active = False
+
+        self.values = []
+        self.bindings = []
+        self.suggests = []
+        self.start_index = None
+
+    def activate(self):
+        self.window.wm_deiconify()
+        self.parent_text_bind('<Up>', self.prev, add=True)
+        self.parent_text_bind('<Down>', self.next, add=True)
+        self.parent_text_bind('<Return>', self.choose, add=True)
+        self.parent_text_bind('<Key>', self.update_event, add=True)
+
+        self.update_event()
+
+        self.is_active = True
+
+        self.start_index = self.get_word()[0]
+
+        text = self.parent.text
+        text.see(self.start_index)
+        x, y, cx, cy = self.parent.text.bbox(self.start_index)
+        acw = self.window
+        acw_width, acw_height = acw.winfo_width(), acw.winfo_height()
+        text_width, text_height = text.winfo_width(), text.winfo_height()
+        new_x = text.winfo_rootx() + min(x, max(0, text_width - acw_width))
+        new_y = text.winfo_rooty() + y
+        if (text_height - (y + cy) >= acw_height  # enough height below
+                or y < acw_height):  # not enough height above
+            # place acw below current line
+            new_y += cy
+        else:
+            # place acw above current line
+            new_y -= acw_height
+        acw.wm_geometry("+%d+%d" % (new_x, new_y))
+
+    def deactivate(self):
+        for args in self.bindings:
+            self.parent.text.unbind(*args)
+        self.bindings.clear()
+        self.window.withdraw()
+
+        self.is_active = False
+
+    def choose(self, event):
+        try:
+            values = self.completion_list.item(self.completion_list.selection(), 'values')
+
+            value = values[0]
+            left, right, word = self.get_word()
+
+            self.parent.text.delete(left, right)
+            self.parent.text.insert('insert', value)
+            self.deactivate()
+            return 'break'
+        except IndexError:
+            return 'break'
+
+    def update_event(self, event=None):
+        left, right, word = self.get_word()
+        if left != self.start_index:
+            self.deactivate()
+            return
+
+        pattern = re.compile('.*'.join(word))
+        try:
+            selected = self.completion_list.item(self.completion_list.selection(), 'values')[0]
+        except IndexError:
+            selected = (None, None)
+        for item in self.completion_list.get_children():
+            self.completion_list.delete(item)
+
+        for suggest in self.suggests:
+            if pattern.search(suggest[0]):
+                element = self.completion_list.insert('', 'end', values=suggest)
+                if suggest[0] == selected[0]:
+                    self.completion_list.selection_set(element)
+
+    def get_word(self):
+        cursor = self.parent.get_cursor()
+        this_line = self.parent.text.get(join_index(cursor.row, 0), cursor)
+        assert isinstance(this_line, str)
+        left_index = cursor.column - 1
+        for left_index in range(cursor.column - 1, -1, -1):
+            if not (this_line[left_index].isidentifier() or this_line[left_index].isdigit()):
+                break
+        else:
+            left_index -= 1
+        left_index += 1
+
+        return TextIndex((cursor.row, left_index)), cursor, this_line[left_index:cursor.column]
+
+    def parent_text_bind(self, sequence, func=None, **kwargs):
+        self.bindings.append((sequence, self.parent.text.bind(sequence, func, **kwargs)))
+
+    def prev(self, event):
+        self.completion_list.selection_set(self.completion_list.prev(self.completion_list.selection()))
+        return 'break'
+
+    def next(self, event):
+        selected = self.completion_list.selection()
+        if selected:
+            self.completion_list.selection_set(self.completion_list.next(self.completion_list.selection()))
+        else:
+            try:
+                self.completion_list.selection_set(self.completion_list.get_children()[0])
+            except IndexError:
+                self.deactivate()
+        return 'break'
 
 # class BracketsMatcher:
 #     def __init__(self):
