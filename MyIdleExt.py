@@ -11,6 +11,8 @@ import tempfile
 import ast
 import inspect
 from code import InteractiveInterpreter
+import keyword
+import builtins
 from idlelib.configHandler import idleConf
 
 try:
@@ -197,17 +199,15 @@ class MyIdleExt:
         self.text.bind('<Key-]>', self.handle_close_bracket)
         self.text.bind('<Key-}>', self.handle_close_bracket)
 
-        self.text.bind('<BackSpace>', self.handle_backspace)
-
         self.text.bind('<<format-pep8>>', self.format_pep8)
         self.text.bind(idleConf.GetOption('extensions', 'MyIdleExt_cfgBindings', 'format-pep8'), self.format_pep8)
-
-        self.text.bind('<Key-.>', self.handle_dot)
 
         # self.code_parser = CodeParser(editwin.text.get('1.0', 'end'))
         self.completion = CodeCompletionWindow(self, editwin.top)
 
         self.text.bind('<Tab>', self.open_completion)
+        self.text.bind('<Key>', self.handle_key, add=True)
+        # self.text.bind('<BackSpace>', self.handle_backspace, add=True)
 
     def expand_brackets_or_quotes(self, event):
         open_bracket = event.char
@@ -311,6 +311,7 @@ class MyIdleExt:
             return  # 以上每种情况都不做处理
 
     def handle_backspace(self, event):
+        # print('handle_backspace')
         cursor = self.get_cursor()
         deleting_char = self.text.get(cursor - 1)
         if deleting_char in '{[(':
@@ -327,7 +328,6 @@ class MyIdleExt:
         if next_char == self.close_brackets[bracket]:
             self.text.delete(cursor - 1, cursor + 1)
             return 'break'
-        return None
 
     def delete_quote(self, quote, cursor):
         in_string = self.position_in_tags(cursor, tags=('STRING',))
@@ -416,17 +416,36 @@ class MyIdleExt:
             import traceback
             traceback.print_exc()
 
-    def handle_dot(self, event):
+    def handle_key(self, event):
+        # print(vars(event))
+        if event.char == '':
+            return
+
+        if event.char == '\b':
+            return self.handle_backspace(event)
+
+        if event.char == '\r':
+            return self.window.newline_and_indent_event(event)
+
+        if event.char in string.ascii_letters or event.char == '.':
+            cursor = self.get_cursor()
+            if self.position_in_tags(cursor):
+                return
+
+            self.open_completion()
+
+        # elif event.char in '{[(\'"':
+        #     self.expand_brackets_or_quotes(event)
+        #
+        # elif event.char in ')]}':
+        #     self.handle_close_bracket(event)
+
+    def handle_tab(self, event):
         cursor = self.get_cursor()
-        if self.position_in_tags(cursor):
-            return
-        code = self.text.get('1.0', cursor)
-        expr_string = self.get_expr(code)
-        try:
-            expr = ast.parse(expr_string).body[0].value
-        except SyntaxError:
-            return
-        self.open_completion()
+        text_before = self.text.get(cursor.line_start, cursor).strip()
+        if text_before != '' and (self.completion.get_word() != '' or text_before[-1] == '.'):
+            self.open_completion()
+            return 'break'
 
     @staticmethod
     def get_expr(code):
@@ -467,6 +486,9 @@ class MyIdleExt:
                     else:
                         string_quote = char
 
+                elif char in ':;':
+                    break
+
             else:
                 if char == string_quote and not is_escape(code[:start_index]):
                     string_quote = None
@@ -485,10 +507,10 @@ class MyIdleExt:
         parser = CodeParser(code)
         parser.parse_as_more_as_possible(self.get_cursor().row)
         parser.prepare()
-        return parser.get_suggests()
+        return parser.get_suggests(expr)
 
     def open_completion(self, event=None):
-        self.completion.suggests = self.get_suggests()
+        self.completion.suggests = self.get_suggests(self.get_expr(self.text.get('1.0', 'insert')))
         self.completion.activate()
         return 'break'
 
@@ -625,7 +647,7 @@ class CodeParser:
         else:
             return None
 
-    def get_words(self):
+    def get_words(self, expr=None):
         parser = self
 
         class Visitor(ast.NodeVisitor):
@@ -678,7 +700,6 @@ class CodeParser:
                     elif isinstance(target, ast.Tuple):
                         self.parse_targets(target.elts)
 
-
         visitor = Visitor()
         visitor.visit(self.tree)
         results = visitor.results
@@ -686,10 +707,49 @@ class CodeParser:
         if None in results:
             results.remove(None)
 
-        return results
+        return {Completion((word, 'abc')) for word in results}
+
+    @staticmethod
+    def get_keywords(expr=None):
+        if expr is None or '.' not in expr:
+            return {Completion((word + ' ', 'keyword')) for word in keyword.kwlist}
+        return set()
+
+    @staticmethod
+    def get_builtins(expr=None):
+        if expr is None or '.' not in expr:
+            return {(Completion((word + '()', 'builtin'))
+                     if callable(getattr(builtins, word)) and not isinstance(getattr(builtins, word), type)
+                     else Completion((word, 'builtin')))
+                    for word in dir(builtins)
+                    if '_' not in word or word in ('__debug__', '__import__')}
+        return set()
 
     def get_suggests(self, expr=None):
-        return [(word, 'abc') for word in self.get_words()]
+        completions = set()
+        completions.update(self.get_keywords(expr))
+        completions.update(self.get_builtins(expr))
+        completions.update(self.get_words(expr))
+        return completions
+
+
+class Completion(tuple):
+    @property
+    def content(self):
+        return self[0]
+
+    @property
+    def type(self):
+        return self[1]
+
+    def __eq__(self, other):
+        return self.content == other.content
+
+    def __hash__(self):
+        return hash(self.content)
+
+    def __repr__(self):
+        return 'Completion(({!r}, {!r}))'.format(self.content, self.type)
 
 
 class CodeCompletionWindow:
@@ -698,12 +758,29 @@ class CodeCompletionWindow:
         self.window = tkinter.Toplevel(master)
         self.window.overrideredirect(True)
         self.window.withdraw()
+
+        # Set up completion_list
+        self.style = tkinter.ttk.Style(self.window)
+        self.style.configure('completion_list.Treeview', font=(
+            idleConf.GetOption('main', 'EditorWindow', 'font'),
+            idleConf.GetOption('main', 'EditorWindow', 'font-size')
+        ))
         self.completion_list = tkinter.ttk.Treeview(
             self.window,
-            columns=['name', 'type'],
-            show='headings'
+            columns=['completion', 'type'],
+            show='headings',
+            style='completion_list.Treeview'
         )
-        self.completion_list.column('type')
+        self.completion_list.column('completion', stretch=True)
+        self.completion_list.column('type', width=100, anchor='e')
+        self.completion_list.heading('completion', text='completion')
+        self.completion_list.heading('type', text='type')
+
+        theme = idleConf.GetOption('main', 'Theme', 'name')
+        self.completion_list.tag_configure('keyword', foreground=idleConf.GetHighlight(theme, 'keyword', 'fg'))
+        self.completion_list.tag_configure('builtin', foreground=idleConf.GetHighlight(theme, 'builtin', 'fg'))
+        self.completion_list.tag_configure('abc', foreground='#333333')
+
         self.completion_list.pack(side='left', fill='both')
         self.scrollbar = tkinter.ttk.Scrollbar(self.window, command=self.completion_list.yview)
         self.completion_list['yscrollcommand'] = self.scrollbar.set
@@ -717,13 +794,14 @@ class CodeCompletionWindow:
         self.start_index = None
 
     def activate(self):
+        if self.is_active:
+            return
         self.window.wm_deiconify()
         self.parent_text_bind('<Up>', self.prev, add=True)
         self.parent_text_bind('<Down>', self.next, add=True)
         self.parent_text_bind('<Return>', self.choose, add=True)
-        self.parent_text_bind('<Key>', self.update_event, add=True)
-
-        self.update_event()
+        self.parent_text_bind('<KeyRelease>', self.filter_completions, add=True)
+        self.parent_text_bind('<BackSpace>', self.update_event, add=True)
 
         self.is_active = True
 
@@ -735,7 +813,7 @@ class CodeCompletionWindow:
         acw = self.window
         acw_width, acw_height = acw.winfo_width(), acw.winfo_height()
         text_width, text_height = text.winfo_width(), text.winfo_height()
-        new_x = text.winfo_rootx() + min(x, max(0, text_width - acw_width))
+        new_x = text.winfo_rootx() + min(x, text_width - acw_width)
         new_y = text.winfo_rooty() + y
         if (text_height - (y + cy) >= acw_height  # enough height below
                 or y < acw_height):  # not enough height above
@@ -746,10 +824,16 @@ class CodeCompletionWindow:
             new_y -= acw_height
         acw.wm_geometry("+%d+%d" % (new_x, new_y))
 
+        self.update_event()
+
     def deactivate(self):
         for args in self.bindings:
             self.parent.text.unbind(*args)
         self.bindings.clear()
+
+        for item in self.completion_list.get_children():
+            self.completion_list.delete(item)
+
         self.window.withdraw()
 
         self.is_active = False
@@ -763,30 +847,41 @@ class CodeCompletionWindow:
 
             self.parent.text.delete(left, right)
             self.parent.text.insert('insert', value)
+            if value.endswith('()'):
+                self.parent.text.mark_set('insert', 'insert-1c')
             self.deactivate()
             return 'break'
         except IndexError:
             return 'break'
 
     def update_event(self, event=None):
+        self.window.after_idle(self.filter_completions)
+
+    def filter_completions(self, event=None):
         left, right, word = self.get_word()
         if left != self.start_index:
             self.deactivate()
             return
 
-        pattern = re.compile('.*'.join(word))
         try:
             selected = self.completion_list.item(self.completion_list.selection(), 'values')[0]
         except IndexError:
             selected = (None, None)
+
         for item in self.completion_list.get_children():
             self.completion_list.delete(item)
 
         for suggest in self.suggests:
-            if pattern.search(suggest[0]):
-                element = self.completion_list.insert('', 'end', values=suggest)
-                if suggest[0] == selected[0]:
+            if match_words(word, list(yield_words(suggest.content))):
+                element = self.completion_list.insert('', 'end', values=suggest, tags=(suggest.type,))
+                if suggest.content == selected:
                     self.completion_list.selection_set(element)
+
+        if self.completion_list.selection() == '':
+            try:
+                self.completion_list.selection_set(self.completion_list.get_children()[0])
+            except IndexError:
+                self.deactivate()
 
     def get_word(self):
         cursor = self.parent.get_cursor()
@@ -802,23 +897,55 @@ class CodeCompletionWindow:
 
         return TextIndex((cursor.row, left_index)), cursor, this_line[left_index:cursor.column]
 
-    def parent_text_bind(self, sequence, func=None, **kwargs):
-        self.bindings.append((sequence, self.parent.text.bind(sequence, func, **kwargs)))
+    def parent_text_bind(self, sequence, func=None, add=True):
+        self.bindings.append((sequence, self.parent.text.bind(sequence, func, add=add)))
 
     def prev(self, event):
-        self.completion_list.selection_set(self.completion_list.prev(self.completion_list.selection()))
+        item = self.completion_list.prev(self.completion_list.selection())
+        self.completion_list.selection_set(item)
+        self.completion_list.see(item)
         return 'break'
 
     def next(self, event):
         selected = self.completion_list.selection()
         if selected:
-            self.completion_list.selection_set(self.completion_list.next(self.completion_list.selection()))
+            item = self.completion_list.next(self.completion_list.selection())
+            self.completion_list.selection_set(item)
+            self.completion_list.see(item)
         else:
             try:
                 self.completion_list.selection_set(self.completion_list.get_children()[0])
             except IndexError:
                 self.deactivate()
         return 'break'
+
+
+def yield_words(identifier, word_regex=re.compile(r"([A-Z]+_+|[a-z]+_+|[A-Z]?[a-z]*|[0-9]+|[~A-Za-z0-9_])")):
+    _words = word_regex.findall(identifier)
+    for word in _words:
+        if '_' in word:
+            underlines_begin = word.index('_')
+            yield word[:underlines_begin]
+            yield word[underlines_begin:]
+        elif word != '':
+            yield word
+
+
+def match_words(pattern, words):
+    if pattern == '':
+        return True
+
+    if len(words) == 0:
+        # return pattern == ''
+        return False
+
+    for pattern_index in range(len(pattern) + 1):
+        if words[0].startswith(pattern[:pattern_index]):
+            if match_words(pattern[pattern_index:], words[1:]):
+                return True
+        else:
+            return False
+
 
 # class BracketsMatcher:
 #     def __init__(self):
