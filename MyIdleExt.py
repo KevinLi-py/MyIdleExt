@@ -10,6 +10,7 @@ import tkinter.ttk
 import tempfile
 import ast
 import inspect
+import glob
 from code import InteractiveInterpreter
 import keyword
 import builtins
@@ -19,6 +20,11 @@ try:
     from idlelib.editor import EditorWindow
 except ImportError:
     from idlelib.EditorWindow import EditorWindow
+
+try:
+    from autocomplete import AutoComplete, HyperParser, COMPLETE_ATTRIBUTES
+except ImportError:
+    from AutoComplete import AutoComplete, HyperParser, COMPLETE_ATTRIBUTES
 
 # from typing import *
 
@@ -202,12 +208,12 @@ class MyIdleExt:
         self.text.bind('<<format-pep8>>', self.format_pep8)
         self.text.bind(idleConf.GetOption('extensions', 'MyIdleExt_cfgBindings', 'format-pep8'), self.format_pep8)
 
-        # self.code_parser = CodeParser(editwin.text.get('1.0', 'end'))
-        self.completion = CodeCompletionWindow(self, editwin.top)
+        self.completion = CodeCompletionWindow(self, self.window.top)
 
         self.text.bind('<Tab>', self.open_completion)
         self.text.bind('<Key>', self.handle_key, add=True)
-        # self.text.bind('<BackSpace>', self.handle_backspace, add=True)
+
+        self.idle_autocomplete = AutoComplete(editwin)
 
     def expand_brackets_or_quotes(self, event):
         open_bracket = event.char
@@ -504,7 +510,7 @@ class MyIdleExt:
 
     def get_suggests(self, expr=None):
         code = self.text.get('1.0', 'end')
-        parser = CodeParser(code)
+        parser = CodeParser(code, self)
         parser.parse_as_more_as_possible(self.get_cursor().row)
         parser.prepare()
         return parser.get_suggests(expr)
@@ -514,55 +520,15 @@ class MyIdleExt:
         self.completion.activate()
         return 'break'
 
-    # def get_suggests(self, name: str):
-    #     if name.startswith('.'):
-    #         # NotImplemented
-    #         return
-    #     self.code_parser.update(self.text.get('1.0', 'end'))
-    #     object_name, pattern = name.rsplit('.', 1)
-    #     self.code_parser.interpreter.runcode('__result__ = ' + object_name)
-    #     obj = self.code_parser.interpreter.locals['__result__']
-    #     attrs = dir(obj)
-    #     pattern = re.compile(r'\w*'.join(pattern))
-    #     possible_names = [attr for attr in attrs if pattern.match(attr)]
-    #     return possible_names
-
-    # def handle_dot(self, event):
-    #     cursor = self.get_cursor()
-    #     if self.position_in_tags(cursor):
-    #         return
-    #
-    #     this_line = self.text.get(join_index(cursor.row, '0'), join_index(cursor.row, 'end'))
-    #
-    #     pattern = re.compile(r"""
-    #     \.?
-    #     (?:\w(?<![0-9]) \w* \.)*
-    #     (?:\w(?<![0-9]) \w*)?""", re.VERBOSE)
-    #
-    #     start = 0
-    #     while start < len(this_line):
-    #         match = pattern.search(this_line, start)
-    #         if match is not None:
-    #             left, right = match.span()
-    #             if left <= cursor <= right:
-    #                 break
-    #         start = match.span()[1]
-    #     else:
-    #         return
-    #
-    #     suggests = self.get_suggests(match.group())
-    #     if len(suggests) == 0:
-    #         return
-    #     else:
-    #         suggests.sort()
-
 
 class CodeParser:
-    def __init__(self, code):
+    def __init__(self, code, master: MyIdleExt):
         self.code = code
         self.tree = self.parse_as_more_as_possible()
         self.imports = []
         self.fromimports = []
+
+        self.master = master
 
     def parse_as_more_as_possible(self, end_lineno=None):
         code = self.code
@@ -712,7 +678,10 @@ class CodeParser:
     @staticmethod
     def get_keywords(expr=None):
         if expr is None or '.' not in expr:
-            return {Completion((word + ' ', 'keyword')) for word in keyword.kwlist}
+            return {(Completion((word + ' ', 'keyword'))
+                     if word not in ('True', 'False', 'None')
+                     else Completion((word, 'keyword')))
+                    for word in keyword.kwlist}
         return set()
 
     @staticmethod
@@ -725,11 +694,53 @@ class CodeParser:
                     if '_' not in word or word in ('__debug__', '__import__')}
         return set()
 
+    @staticmethod
+    def get_modules(self, expr=None):
+        packages = [] if expr is None else expr.split('.')[:-1]
+        suggests = set()
+        for path in sys.path:
+            files = glob.glob(os.path.join(os.path.join(path, *packages), '*'))
+            for file in files:
+                if file.endswith(('.pyw', '.pyc', '.pyo', '.pyd')):
+                    suggests.add(Completion((os.path.split(file)[-1][:-4], 'module')))
+                elif file.endswith('.py'):
+                    suggests.add(Completion((os.path.split(file)[-1][:-3], 'module')))
+                elif os.path.isdir(file) and os.path.isfile(os.path.join(file, '__init__.py')):
+                    suggests.add(Completion((os.path.split(file)[-1], 'package')))
+
+        return suggests
+
+    def get_idle_suggests(self, expr=None):
+        hp = HyperParser(self.master.window, "insert")
+        curline = self.master.text.get("insert linestart", "insert")
+        i = j = len(curline)
+
+        while i and (curline[i - 1] in self.master.identifier_chars or ord(curline[i - 1]) > 127):
+            i -= 1
+        comp_start = curline[i:j]
+        if i and curline[i - 1] == '.':
+            hp.set_index("insert-%dc" % (len(curline) - (i - 1)))
+            comp_what = hp.get_expression()
+            if not comp_what:
+                return
+        else:
+            comp_what = ""
+
+        comp_lists = self.master.idle_autocomplete.fetch_completions(comp_what, COMPLETE_ATTRIBUTES)
+        return {Completion((completion, 'idle')) for completion in comp_lists[1]}
+
     def get_suggests(self, expr=None):
         completions = set()
-        completions.update(self.get_keywords(expr))
-        completions.update(self.get_builtins(expr))
-        completions.update(self.get_words(expr))
+        current_line = self.master.text.get('insert linestart', 'insert').strip()
+        if current_line.startswith(('import', 'from')):
+            completions.update(self.get_modules(expr))
+        else:
+            if expr is not None and '.' not in expr:
+                completions.update(self.get_keywords(expr))
+                completions.update(self.get_builtins(expr))
+            elif expr is not None and '.' in expr:
+                completions.update(self.get_idle_suggests(expr))
+            completions.update(self.get_words(expr))
         return completions
 
 
@@ -750,6 +761,26 @@ class Completion(tuple):
 
     def __repr__(self):
         return 'Completion(({!r}, {!r}))'.format(self.content, self.type)
+
+    def __lt__(self, other):
+        self_suffix_underlines = 0
+        for char in self.content:
+            if char != '_':
+                break
+            else:
+                self_suffix_underlines += 1
+
+        other_suffix_underlines = 0
+        for char in other.content:
+            if char != '_':
+                break
+            else:
+                other_suffix_underlines += 1
+
+        if self_suffix_underlines != other_suffix_underlines:
+            return self_suffix_underlines < other_suffix_underlines
+        else:
+            return self.content[self_suffix_underlines:] < other.content[other_suffix_underlines:]
 
 
 class CodeCompletionWindow:
@@ -780,6 +811,9 @@ class CodeCompletionWindow:
         self.completion_list.tag_configure('keyword', foreground=idleConf.GetHighlight(theme, 'keyword', 'fg'))
         self.completion_list.tag_configure('builtin', foreground=idleConf.GetHighlight(theme, 'builtin', 'fg'))
         self.completion_list.tag_configure('abc', foreground='#333333')
+        self.completion_list.tag_configure('idle', foreground='#ff00ff')
+        self.completion_list.tag_configure('module', foreground='#808040')
+        self.completion_list.tag_configure('package', foreground='#808040')
 
         self.completion_list.pack(side='left', fill='both')
         self.scrollbar = tkinter.ttk.Scrollbar(self.window, command=self.completion_list.yview)
@@ -871,11 +905,14 @@ class CodeCompletionWindow:
         for item in self.completion_list.get_children():
             self.completion_list.delete(item)
 
-        for suggest in self.suggests:
-            if match_words(word, list(yield_words(suggest.content))):
-                element = self.completion_list.insert('', 'end', values=suggest, tags=(suggest.type,))
-                if suggest.content == selected:
-                    self.completion_list.selection_set(element)
+        suggests = [suggest for suggest in self.suggests
+                    if match_words(word, list(yield_words(suggest.content)))]
+
+        suggests.sort()
+        for suggest in suggests:
+            element = self.completion_list.insert('', 'end', values=suggest, tags=(suggest.type,))
+            if suggest.content == selected:
+                self.completion_list.selection_set(element)
 
         if self.completion_list.selection() == '':
             try:
@@ -945,32 +982,3 @@ def match_words(pattern, words):
                 return True
         else:
             return False
-
-
-# class BracketsMatcher:
-#     def __init__(self):
-#         self.before = []
-#         self.after = []
-#         self.before_quote = ''
-#         self.after_quote = ''
-#
-#     def parse_before(self, text):
-#
-#         for i, char in zip(range(len(text) - 1, -1, -1), reversed(text)):
-#             if char in ('"', "'"):
-#                 if self.before_quote == '':
-#                     if text[i + 1:i + 3] == char * 2:
-#                         self.before_quote = char * 3
-#                     else:
-#                         self.before_quote = char
-#
-#                 elif char in self.before_quote:
-#                     two_chars_before = text[i - 2:i]
-#                     if two_chars_before[1] == '\\' and two_chars_before[0] != '\\':
-#                         continue
-#                     elif char == self.before_quote:
-#                         self.before_quote = ''
-#                     elif text[i + 1:i + 3] == char * 2:
-#                         self.before_quote = ''
-#
-#             elif char in (':', ';')
