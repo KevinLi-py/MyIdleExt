@@ -1,37 +1,17 @@
-"""My Idle Extension"""
+"""
+MyIdleExt -- My Idle Extension
+------------------------------
+This is a idle extension which provides code completion, brackets/quotes completion and more features.
+This file should be loaded by idlelib.
+In this way, it will provide the features mentioned above.
+Otherwise, if you run this file as `__main__` (Run directly),
+you can do some operations such as install and uninstall.
+"""
 import re
 import os
 import sys
-import textwrap
-import string
-import tkinter
-import tkinter.messagebox
-import tkinter.ttk
-import tempfile
-import ast
-import inspect
-import glob
-from code import InteractiveInterpreter
-import keyword
-import builtins
-from idlelib.configHandler import idleConf
 
-try:
-    from idlelib.editor import EditorWindow
-except ImportError:
-    from idlelib.EditorWindow import EditorWindow
-
-try:
-    from autocomplete import AutoComplete, HyperParser, COMPLETE_ATTRIBUTES
-except ImportError:
-    from AutoComplete import AutoComplete, HyperParser, COMPLETE_ATTRIBUTES
-
-# from typing import *
-
-try:
-    import autopep8
-except (ImportError, ValueError):
-    autopep8 = None
+version = _version_ = '0.2.0'
 
 config_extension_def = """
 [MyIdleExt]
@@ -43,6 +23,181 @@ enable_shell=0
 format-pep8=<Control-l>
 
 """
+
+
+def on_run_as_main():
+    import shutil
+    import traceback
+    import argparse
+    import configparser
+
+    def find_idlelib():
+        for path in sys.path:
+            try:
+                for directory in os.listdir(path):
+                    if directory == 'idlelib' and os.path.isdir(os.path.join(path, directory)):
+                        config_extension_filename = os.path.join(path, directory, 'config-extensions.def')
+                        if os.path.isfile(config_extension_filename):
+                            return os.path.join(path, 'idlelib')
+            except OSError:
+                pass
+        print('`idlelib` not found. Try to specified the path of it. ')
+        sys.exit()
+
+    arg_parser = argparse.ArgumentParser('MyIdleExt', description=__doc__)
+    subparsers_group = arg_parser.add_subparsers(title='Commands', dest='command', metavar='<command>')
+
+    command_install = subparsers_group.add_parser('install', help='Install MyIdleExt for your idle. '
+                                                                  'You might need to restart idle to apply. ')
+    command_install.add_argument('--path', help='The path of idlelib to install MyIdleExt. '
+                                                'If is not specified, program will search it in `sys.path`. ',
+                                 default='')
+    command_install.add_argument('--sure', action='store_const', const=True, default=False,
+                                 help='If it is already installed, do not ask if the user want to overwrite. ')
+
+    command_uninstall = subparsers_group.add_parser('uninstall', help='Uninstall MyIdleExt for your idle')
+    command_uninstall.add_argument('--path', help='The path of idlelib to uninstall MyIdleExt. '
+                                                  'If is not specified, program will search it in `sys.path`. ',
+                                   default='')
+    command_uninstall.add_argument('--sure', action='store_const', const=True, default=False,
+                                   help='Do not ask if the user really want to uninstall. ')
+
+    subparsers_group.add_parser('version', help='Show the version of MyIdleExt. ')
+
+    def is_installed(idle_path):
+        return os.path.isfile(os.path.join(idle_path, 'MyIdleExt.py'))
+
+    def ask_yes_no(question):
+        while True:
+            answer = input(question + ' (y/n)> ')
+            if answer == 'y':
+                return True
+            elif answer == 'n':
+                return False
+            else:
+                print("Please input 'y' or 'n'. Try again. ")
+
+    def install(this, args):
+        if args.path == '':
+            args.path = find_idlelib()
+        if is_installed(args.path) and not args.sure:
+            if not ask_yes_no('MyIdleExt looks already installed in "{}". '
+                              'Are you sure to overwrite?'.format(args.path)):
+                print('Operation canceled. ')
+                return
+        shutil.copy(this, os.path.join(args.path, 'MyIdleExt.py'))
+        default_config = configparser.ConfigParser()
+        default_config.read_string(config_extension_def)
+        idle_config = configparser.ConfigParser()
+        idle_config.read(os.path.join(args.path, 'config-extensions.def'))
+        for section in default_config.sections():
+            if not idle_config.has_section(section):
+                idle_config.add_section(section)
+            for key, value in default_config.items(section):
+                idle_config.set(section, key, value)
+
+        with open(os.path.join(args.path, 'config-extensions.def'), 'w') as fp:
+            idle_config.write(fp)
+
+        print('MyIdleExt installed successfully. ')
+
+    def uninstall(this, args):
+        if args.path == '':
+            args.path = find_idlelib()
+        if not is_installed(args.path):
+            print('MyIdleExt is not installed. ')
+            return
+        if not args.sure:
+            if not ask_yes_no('Are you sure to uninstall MyIdleExt in "{}"?'.format(args.path)):
+                print('Operation canceled. ')
+        os.remove(os.path.join(args.path, 'MyIdleExt.py'))
+        default_config = configparser.ConfigParser()
+        default_config.read_string(config_extension_def)
+        idle_config = configparser.ConfigParser()
+        idle_config.read(os.path.join(args.path, 'config-extensions.def'))
+        for section in default_config.sections():
+            if idle_config.has_section(section):
+                idle_config.remove_section(section)
+
+        with open(os.path.join(args.path, 'config-extensions.def'), 'w') as fp:
+            idle_config.write(fp)
+
+        print('MyIdleExt uninstalled successfully. ')
+
+    def version(this, args):
+        print(_version_)
+
+    args = arg_parser.parse_args()
+    this = sys.argv[0]
+
+    if args.command is None:
+        print("You did not give any arguments in the command line. ")
+        print('But do not be worried -- you can input here. ')
+        print('Type `all` for all commands, `help` for help, '
+              '`<command> -h` for help with the specifiesd command, or `quit` to quit ')
+        pattern = re.compile(r'"[^"]*"|[^ "]*')
+
+        while True:
+            command = input('command> ')
+            if command.strip() == 'all':
+                print(*subparsers_group.choices, sep='\n')
+                continue
+            if command.strip() == 'quit':
+                sys.exit()
+            if command.strip() == 'help':
+                arg_parser.print_help()
+            else:
+                try:
+                    args = arg_parser.parse_args([arg.strip('"') for arg in pattern.findall(command) if arg.strip()])
+                    if args.command is None:
+                        print('Please input a command')
+                    else:
+                        try:
+                            locals()[args.command](this, args)
+                        except Exception:
+                            traceback.print_exc()
+                except SystemExit:
+                    pass
+
+    else:
+        locals()[args.command](this, args)
+
+
+if __name__ == '__main__':
+    on_run_as_main()
+    sys.exit()
+
+import string
+import tkinter
+import tkinter.messagebox
+import tkinter.ttk
+import tempfile
+import ast
+import inspect
+import glob
+from code import InteractiveInterpreter
+import keyword
+import builtins
+
+try:
+    from idlelib.config import idleConf
+except ImportError:
+    from idlelib.configHandler import idleConf
+
+try:
+    from idlelib.editor import EditorWindow
+except ImportError:
+    from idlelib.EditorWindow import EditorWindow
+
+try:
+    from idlelib.autocomplete import AutoComplete, HyperParser, ATTRS as COMPLETE_ATTRIBUTES
+except ImportError:
+    from idlelib.AutoComplete import AutoComplete, HyperParser, COMPLETE_ATTRIBUTES
+
+try:
+    import autopep8
+except (ImportError, ValueError):
+    autopep8 = None
 
 
 def split_index(string):
@@ -254,7 +409,7 @@ class MyIdleExt:
         elif self.position_in_tags(cursor):  # 字符串或注释中，不补全括号
             return
 
-        if next_char is '' or next_char not in self.identifier_chars:
+        if next_char == '' or next_char not in self.identifier_chars:
             self.text.insert(cursor, open_bracket + close_bracket)
             self.text.mark_set('insert', cursor + 1)
             return 'break'
@@ -678,8 +833,16 @@ class CodeParser:
     @staticmethod
     def get_keywords(expr=None):
         if expr is None or '.' not in expr:
+            completions = set()
+            for word in keyword.kwlist:
+                if word in ('True', 'False', 'None', 'continue', 'break', 'except'):
+                    completions.add(Completion((word, 'keyword')))
+                elif word in ('try', 'else', 'finally'):
+                    completions.add(Completion((word + ':', 'keyword')))
+                else:
+                    completions.add(Completion((word + ' ', 'keyword')))
             return {(Completion((word + ' ', 'keyword'))
-                     if word not in ('True', 'False', 'None')
+                     if word not in ('True', 'False', 'None', 'continue', 'break')
                      else Completion((word, 'keyword')))
                     for word in keyword.kwlist}
         return set()
@@ -808,12 +971,13 @@ class CodeCompletionWindow:
         self.completion_list.heading('type', text='type')
 
         theme = idleConf.GetOption('main', 'Theme', 'name')
-        self.completion_list.tag_configure('keyword', foreground=idleConf.GetHighlight(theme, 'keyword', 'fg'))
-        self.completion_list.tag_configure('builtin', foreground=idleConf.GetHighlight(theme, 'builtin', 'fg'))
+        self.completion_list.tag_configure('keyword', foreground=idleConf.GetHighlight(theme, 'keyword')['foreground'])
+        self.completion_list.tag_configure('builtin', foreground=idleConf.GetHighlight(theme, 'builtin')['foreground'])
         self.completion_list.tag_configure('abc', foreground='#333333')
         self.completion_list.tag_configure('idle', foreground='#ff00ff')
         self.completion_list.tag_configure('module', foreground='#808040')
         self.completion_list.tag_configure('package', foreground='#808040')
+        # print(self.completion_list.tag_configure('package'))
 
         self.completion_list.pack(side='left', fill='both')
         self.scrollbar = tkinter.ttk.Scrollbar(self.window, command=self.completion_list.yview)
@@ -910,11 +1074,15 @@ class CodeCompletionWindow:
 
         suggests.sort()
         for suggest in suggests:
+            # print(suggest.type)
             element = self.completion_list.insert('', 'end', values=suggest, tags=(suggest.type,))
+            # print(self.completion_list.item(element, 'tags'))
+            # self.completion_list.item(element, tags=(suggest.type,))
             if suggest.content == selected:
                 self.completion_list.selection_set(element)
 
-        if self.completion_list.selection() == '':
+        selection = self.completion_list.selection()
+        if selection == '' or selection == ():
             try:
                 self.completion_list.selection_set(self.completion_list.get_children()[0])
             except IndexError:
