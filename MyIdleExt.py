@@ -770,8 +770,10 @@ class CodeParser:
 
     def get_words(self, expr=None):
         parser = self
+        if expr is None:
+            expr = ''
 
-        class Visitor(ast.NodeVisitor):
+        class NameCompletionVisitor(ast.NodeVisitor):
             def __init__(self):
                 self.results = set()
 
@@ -781,16 +783,18 @@ class CodeParser:
                 self.results.update(node.args.kwonlyargs)
                 self.results.add(node.args.vararg)
                 self.results.add(node.args.kwarg)
+                self.generic_visit(node)
 
             def visit_Lambda(self, node):
-                self.results.add(node.name)
                 self.results.update(node.args.args)
                 self.results.update(node.args.kwonlyargs)
                 self.results.add(node.args.vararg)
                 self.results.add(node.args.kwarg)
+                self.generic_visit(node)
 
             def visit_ClassDef(self, node):
                 self.results.add(node.name)
+                self.generic_visit(node)
 
             def visit_Assign(self, node):
                 self.parse_targets(node.targets)
@@ -799,9 +803,11 @@ class CodeParser:
                 for item in node.items:
                     if item.optional_vars is not None:
                         self.parse_targets([item.optional_vars])
+                self.generic_visit(node)
 
             def visit_For(self, node):
                 self.parse_targets([node.target])
+                self.generic_visit(node)
 
             def visit_Import(self, node):
                 for name in node.names:
@@ -813,6 +819,7 @@ class CodeParser:
 
             def visit_ExceptHandler(self, node):
                 self.results.add(node.name)
+                self.generic_visit(node)
 
             def parse_targets(self, targets):
                 for target in targets:
@@ -821,7 +828,7 @@ class CodeParser:
                     elif isinstance(target, ast.Tuple):
                         self.parse_targets(target.elts)
 
-        visitor = Visitor()
+        visitor = NameCompletionVisitor()
         visitor.visit(self.tree)
         results = visitor.results
 
@@ -977,7 +984,7 @@ class CodeCompletionWindow:
         self.completion_list.tag_configure('idle', foreground='#ff00ff')
         self.completion_list.tag_configure('module', foreground='#808040')
         self.completion_list.tag_configure('package', foreground='#808040')
-        # print(self.completion_list.tag_configure('package'))
+        print(self.completion_list.tag_configure('package'))
 
         self.completion_list.pack(side='left', fill='both')
         self.scrollbar = tkinter.ttk.Scrollbar(self.window, command=self.completion_list.yview)
