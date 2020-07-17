@@ -18,20 +18,8 @@ config_extension_def = """
 enable=1
 enable_editor=1
 enable_shell=0
-color_keyword_fg = #ff7700
-color_builtin_fg = #900090
-color_idle_fg = #ff00ff
-color_abc_fg = #b0b0b0
-color_module-name_fg = #d6d600
-color_package-name_fg = #d6d600
-color_module_fg = #d6d600
-color_function_fg = #c8c800
-color_parameter_fg = #000000
-color_variable_fg = #000000
-
 [MyIdleExt_cfgBindings]
 format-pep8=<Control-l>
-
 """
 
 
@@ -95,10 +83,7 @@ def on_run_as_main():
                               'Are you sure to overwrite?'.format(args.path)):
                 print('Operation canceled. ')
                 return
-        try:
-            shutil.copy(this, os.path.join(args.path, 'MyIdleExt.py'))
-        except shutil.SameFileError:
-            pass
+        shutil.copy(this, os.path.join(args.path, 'MyIdleExt.py'))
         default_config = configparser.ConfigParser()
         default_config.read_string(config_extension_def)
         idle_config = configparser.ConfigParser()
@@ -181,7 +166,6 @@ if __name__ == '__main__':
     sys.exit()
 
 import string
-import random
 import tkinter
 import tkinter.messagebox
 import tkinter.ttk
@@ -203,16 +187,10 @@ try:
 except ImportError:
     from idlelib.EditorWindow import EditorWindow
 
-has_idle_autocomplete = True
 try:
     from idlelib.autocomplete import AutoComplete, HyperParser, ATTRS as COMPLETE_ATTRIBUTES
-    from idlelib import autocomplete
 except ImportError:
-    try:
-        from idlelib.AutoComplete import AutoComplete, HyperParser, COMPLETE_ATTRIBUTES
-        from idlelib import AutoComplete as autocomplete
-    except ImportError:
-        has_idle_autocomplete = False
+    from idlelib.AutoComplete import AutoComplete, HyperParser, COMPLETE_ATTRIBUTES
 
 try:
     import autopep8
@@ -333,9 +311,6 @@ class TextIndex:
     def __ge__(self, other):
         return self > other or self == other
 
-    def __iter__(self):
-        return iter((self.row, self.column))
-
     @property
     def line_start(self):
         return join_index(self.row, 0)
@@ -388,25 +363,8 @@ class MyIdleExt:
 
         self.completion = CodeCompletionWindow(self, self.window.top)
 
-        self.text.bind('<Tab>', self.handle_tab, add=True)
+        self.text.bind('<Tab>', self.open_completion)
         self.text.bind('<Key>', self.handle_key, add=True)
-
-        class FakeObject:
-            """“假”对象，允许任何方法调用，不报错，不执行任何操作"""
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def __getattr__(self, item):
-                return self
-
-            def __call__(self, *args, **kwargs):
-                return self
-
-            def __getitem__(self, item):
-                return self
-
-        # 禁止 idle.autocomplete 弹出窗口
-        autocomplete.AutoComplete._make_autocomplete_window = FakeObject()
 
         self.idle_autocomplete = AutoComplete(editwin)
 
@@ -633,25 +591,75 @@ class MyIdleExt:
             if self.position_in_tags(cursor):
                 return
 
-            self.text.after_idle(self.open_completion)
-            if event.char == '.':  # 阻止idle原本的自动提示弹出
-                self.text.insert('insert', '.')
-                return 'break'
+            self.open_completion()
+
+        # elif event.char in '{[(\'"':
+        #     self.expand_brackets_or_quotes(event)
+        #
+        # elif event.char in ')]}':
+        #     self.handle_close_bracket(event)
 
     def handle_tab(self, event):
         cursor = self.get_cursor()
         text_before = self.text.get(cursor.line_start, cursor).strip()
         if text_before != '' and (self.completion.get_word() != '' or text_before[-1] == '.'):
-            self.text.after_idle(self.open_completion)
+            self.open_completion()
             return 'break'
 
     @staticmethod
     def get_expr(code):
-        match = re.search(r'(?:\w|\.|\d)+', code[::-1])
-        if match is None:
+        open_brackets = {
+            '(': ')',
+            '[': ']',
+            '{': '}'
+        }
+        close_brackets = {
+            ')': '(',
+            ']': '[',
+            '}': '{'
+        }
+
+        stack = []
+        string_quote = None
+        start_index = len(code) - 1
+        for start_index in range(len(code) - 1, -1, -1):
+            char = code[start_index]
+            if string_quote is None:
+                if char in close_brackets.values():
+                    stack.append(char)
+
+                elif char in open_brackets.values():
+                    if len(stack) >= 1:
+                        from_stack = stack[-1]
+                        if char == close_brackets[from_stack]:
+                            stack.pop()
+                        else:
+                            start_index = min(start_index + 1, len(code) - 1)
+                            break
+                    else:
+                        break
+
+                elif char in ('"', "'"):
+                    if code[start_index:start_index + 3] == char * 3:
+                        string_quote = char * 3
+                    else:
+                        string_quote = char
+
+                elif char in ':;':
+                    break
+
+            else:
+                if char == string_quote and not is_escape(code[:start_index]):
+                    string_quote = None
+
+                if (char in string_quote and code[start_index:start_index + 3] == string_quote
+                        and not is_escape(code[:start_index])):
+                    string_quote = None
+
+        if string_quote is not None or len(stack) != 0:
             return ''
-        else:
-            return match.group()[::-1]
+
+        return code[start_index:].strip(':, ')
 
     def get_suggests(self, expr=None):
         code = self.text.get('1.0', 'end')
@@ -661,9 +669,7 @@ class MyIdleExt:
         return parser.get_suggests(expr)
 
     def open_completion(self, event=None):
-        if self.completion.is_active:
-            return
-        self.completion.suggests = self.get_suggests(self.get_expr(self.text.get('insert linestart', 'insert')))
+        self.completion.suggests = self.get_suggests(self.get_expr(self.text.get('1.0', 'insert')))
         self.completion.activate()
         return 'break'
 
@@ -671,34 +677,21 @@ class MyIdleExt:
 class CodeParser:
     def __init__(self, code, master: MyIdleExt):
         self.code = code
+        self.tree = self.parse_as_more_as_possible()
         self.imports = []
         self.fromimports = []
 
         self.master = master
-        # 解析语法时如遇到SyntaxError，尝试在出错位置加入以下字符串，以修复用户在点号后尚未输入标识符的语法错误
-        self.fix_empty_identifier = '_fix_empty_identifier_{:04d}_'.format(random.randint(0, 9999))
-
-        self.tree = self.parse_as_more_as_possible()
 
     def parse_as_more_as_possible(self, end_lineno=None):
         code = self.code
         code_lines = code.splitlines()
         end_lineno = len(code_lines) if end_lineno is None else end_lineno
-        tried_fix = False
         while True:
             try:
                 tree = ast.parse('\n'.join(code_lines[:end_lineno]))
             except SyntaxError as syntax_error:
-                if (not tried_fix) and syntax_error.msg.strip().lower() == 'invalid syntax':
-                    error_line = code_lines[syntax_error.lineno - 1]
-                    code_lines[syntax_error.lineno - 1] = (error_line[syntax_error.offset:]
-                                                           + self.fix_empty_identifier
-                                                           + error_line[:syntax_error.offset])
-                    tried_fix = True
-                    continue
-                else:
-                    end_lineno = syntax_error.lineno - 1
-                    tried_fix = False
+                end_lineno = syntax_error.lineno - 1
             else:
                 break
         return tree
@@ -773,39 +766,33 @@ class CodeParser:
         else:
             return None
 
-    def get_node_path(self, line, offset):
-        path = []
-        current_node = self.tree
-        while True:
-            next_node = None
-            path.append(current_node)
-            for field, value in ast.iter_fields(current_node):
-                if isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, ast.AST):
-                            try:
-                                if (item.lineno, item.col_offset) <= (line, offset):
-                                    next_node = item
-                            except AttributeError:
-                                pass
-                elif isinstance(value, ast.AST):
-                    try:
-                        if (value.lineno, value.col_offset) <= (line, offset):
-                            next_node = value
-                    except AttributeError:
-                        pass
+    def get_words(self, expr=None):
+        parser = self
+        if expr is None:
+            expr = ''
 
-            if next_node is not None:
-                current_node = next_node
-            else:
-                return path
-
-    def get_variables(self, node_path):
-        class ScopeVariableCollector(ReversedNodeVisitor):
-            """访问一个节点，收集其中定义的所有变量，不包括其中的子作用域"""
-
+        class NameCompletionVisitor(ast.NodeVisitor):
             def __init__(self):
                 self.results = set()
+
+            def visit_FunctionDef(self, node):
+                self.results.add(node.name)
+                self.results.update(node.args.args)
+                self.results.update(node.args.kwonlyargs)
+                self.results.add(node.args.vararg)
+                self.results.add(node.args.kwarg)
+                self.generic_visit(node)
+
+            def visit_Lambda(self, node):
+                self.results.update(node.args.args)
+                self.results.update(node.args.kwonlyargs)
+                self.results.add(node.args.vararg)
+                self.results.add(node.args.kwarg)
+                self.generic_visit(node)
+
+            def visit_ClassDef(self, node):
+                self.results.add(node.name)
+                self.generic_visit(node)
 
             def visit_Assign(self, node):
                 self.parse_targets(node.targets)
@@ -822,11 +809,11 @@ class CodeParser:
 
             def visit_Import(self, node):
                 for name in node.names:
-                    self.register_var(name.asname or name.name, 'module')
+                    self.results.add(name.asname or name.name)
 
             def visit_ImportFrom(self, node):
                 for name in node.names:
-                    self.register_var(name.asname or name.name)
+                    self.results.add(name.asname or name.name)
 
             def visit_ExceptHandler(self, node):
                 self.results.add(node.name)
@@ -835,118 +822,21 @@ class CodeParser:
             def parse_targets(self, targets):
                 for target in targets:
                     if isinstance(target, ast.Name):
-                        self.register_var(target.id)
-                    elif isinstance(target, ast.Starred):
-                        self.register_var(target.value.id)
+                        self.results.add(target.id)
                     elif isinstance(target, ast.Tuple):
                         self.parse_targets(target.elts)
 
-            def visit_FunctionDef(self, node):
-                self.register_var(node.name + '()', 'function')
+        visitor = NameCompletionVisitor()
+        visitor.visit(self.tree)
+        results = visitor.results
 
-            def visit_ClassDef(self, node):
-                self.register_var(node.name, 'class')
+        if None in results:
+            results.remove(None)
 
-            def register_var(self, name, type='variable'):
-                if name is None:
-                    return
-                if isinstance(name, (list, tuple)):
-                    for n in name:
-                        self.results.add(Completion((n, type)))
-                else:
-                    self.results.add(Completion((name, type)))
-
-            def visit_Lambda(self, node):
-                pass
-
-            def visit_DictComp(self, node):
-                pass
-
-            def visit_GeneratorExp(self, node):
-                pass
-
-            def visit_ListComp(self, node):
-                pass
-
-            def visit_SetComp(self, node):
-                pass
-
-            @classmethod
-            def collect(cls, node):
-                collector = cls()
-                if isinstance(node, (ast.Lambda, ast.FunctionDef)):
-                    collector.register_var(node.args.args, 'parameter')
-                    collector.register_var(node.args.kwonlyargs, 'parameter')
-                    collector.register_var(node.args.vararg, 'parameter')
-                    collector.register_var(node.args.kwarg, 'parameter')
-                collector.visit(node)
-                return collector.results
-
-        results = set()
-        for node in reversed(node_path):
-            if isinstance(node, (ast.Lambda, ast.FunctionDef, ast.GeneratorExp,
-                                 ast.ListComp, ast.SetComp, ast.DictComp, ast.Module)):
-                results.update(ScopeVariableCollector.collect(node))
-        return results
-
-    def get_words(self, expr=None, node_path=()):
-        parser = self
-        expr_parts = expr.strip('()[]{}"\'').split('.')
-        try:
-            expr_last = expr_parts[-1]
-        except IndexError:
-            expr_last = ''
-        expr_parts = expr_parts[:-1]
-
-        class WordCollector(ast.NodeVisitor):
-            def __init__(self):
-                self.results = set()
-
-            def visit_Name(self, node):
-                if len(expr_parts) == 0:
-                    self.register_var(node.id)
-
-            def visit_Attribute(self, node):
-                # print(expr_parts, self.split_attribute(node)[:-1])
-                if expr_parts == self.split_attribute(node)[:-1]:
-                    self.register_var(node.attr)
-
-            @staticmethod
-            def split_attribute(node):
-                current_node = node
-                parts = []
-                while True:
-                    if isinstance(current_node, ast.Name):
-                        parts.append(current_node.id)
-                        break
-                    elif isinstance(current_node, ast.Attribute):
-                        parts.append(current_node.attr)
-                        current_node = current_node.value
-                    else:
-                        break
-                return parts[::-1]
-
-            def register_var(self, name, type='abc'):
-                if name is None:
-                    return
-                if isinstance(name, (list, tuple)):
-                    for n in name:
-                        if name != expr_last:
-                            self.results.add(Completion((n, type)))
-                else:
-                    if name != expr_last:
-                        self.results.add(Completion((name, type)))
-
-            @classmethod
-            def collect(cls, tree):
-                collector = cls()
-                collector.visit(tree)
-                return collector.results
-
-        return WordCollector.collect(self.tree)
+        return {Completion((word, 'abc')) for word in results}
 
     @staticmethod
-    def get_keywords(expr=None, node_path=()):
+    def get_keywords(expr=None):
         if expr is None or '.' not in expr:
             completions = set()
             for word in keyword.kwlist:
@@ -963,7 +853,7 @@ class CodeParser:
         return set()
 
     @staticmethod
-    def get_builtins(expr=None, node_path=()):
+    def get_builtins(expr=None):
         if expr is None or '.' not in expr:
             return {(Completion((word + '()', 'builtin'))
                      if callable(getattr(builtins, word)) and not isinstance(getattr(builtins, word), type)
@@ -973,79 +863,53 @@ class CodeParser:
         return set()
 
     @staticmethod
-    def get_modules(expr=None, node_path=()):
+    def get_modules(self, expr=None):
         packages = [] if expr is None else expr.split('.')[:-1]
         suggests = set()
         for path in sys.path:
             files = glob.glob(os.path.join(os.path.join(path, *packages), '*'))
             for file in files:
                 if file.endswith(('.pyw', '.pyc', '.pyo', '.pyd')):
-                    suggests.add(Completion((os.path.split(file)[-1][:-4], 'module-name')))
+                    suggests.add(Completion((os.path.split(file)[-1][:-4], 'module')))
                 elif file.endswith('.py'):
-                    suggests.add(Completion((os.path.split(file)[-1][:-3], 'module-name')))
+                    suggests.add(Completion((os.path.split(file)[-1][:-3], 'module')))
                 elif os.path.isdir(file) and os.path.isfile(os.path.join(file, '__init__.py')):
-                    suggests.add(Completion((os.path.split(file)[-1], 'package-name')))
+                    suggests.add(Completion((os.path.split(file)[-1], 'package')))
 
         return suggests
 
-    def get_idle_suggests(self, expr=None, node_path=()):
-        if has_idle_autocomplete:
-            hp = HyperParser(self.master.window, "insert")
-            curline = self.master.text.get("insert linestart", "insert")
-            i = j = len(curline)
+    def get_idle_suggests(self, expr=None):
+        hp = HyperParser(self.master.window, "insert")
+        curline = self.master.text.get("insert linestart", "insert")
+        i = j = len(curline)
 
-            while i and (curline[i - 1] in self.master.identifier_chars or ord(curline[i - 1]) > 127):
-                i -= 1
-            comp_start = curline[i:j]
-            if i and curline[i - 1] == '.':
-                hp.set_index("insert-%dc" % (len(curline) - (i - 1)))
-                comp_what = hp.get_expression()
-                if not comp_what:
-                    return
-            else:
-                comp_what = ""
-
-            comp_lists = self.master.idle_autocomplete.fetch_completions(comp_what, COMPLETE_ATTRIBUTES)
-            return {Completion((completion, 'idle')) for completion in comp_lists[1]}
+        while i and (curline[i - 1] in self.master.identifier_chars or ord(curline[i - 1]) > 127):
+            i -= 1
+        comp_start = curline[i:j]
+        if i and curline[i - 1] == '.':
+            hp.set_index("insert-%dc" % (len(curline) - (i - 1)))
+            comp_what = hp.get_expression()
+            if not comp_what:
+                return
         else:
-            return set()
+            comp_what = ""
 
-    def get_suggests(self, expr):
-        cursor = self.master.get_cursor()
-        # expr = self.master.get_expr(self.master.text.get('1.0', cursor))
-        node_path = self.get_node_path(*cursor)
+        comp_lists = self.master.idle_autocomplete.fetch_completions(comp_what, COMPLETE_ATTRIBUTES)
+        return {Completion((completion, 'idle')) for completion in comp_lists[1]}
+
+    def get_suggests(self, expr=None):
         completions = set()
         current_line = self.master.text.get('insert linestart', 'insert').strip()
         if current_line.startswith(('import', 'from')):
             completions.update(self.get_modules(expr))
         else:
             if expr is not None and '.' not in expr:
-                completions.update(self.get_keywords(expr, node_path))
-                completions.update(self.get_builtins(expr, node_path))
-                if len(node_path) > 0:
-                    completions.update(self.get_variables(node_path))
+                completions.update(self.get_keywords(expr))
+                completions.update(self.get_builtins(expr))
             elif expr is not None and '.' in expr:
                 completions.update(self.get_idle_suggests(expr))
             completions.update(self.get_words(expr))
         return completions
-
-
-class ReversedNodeVisitor(object):
-    def visit(self, node):
-        """Visit a node."""
-        method = 'visit_' + node.__class__.__name__
-        visitor = getattr(self, method, self.generic_visit)
-        return visitor(node)
-
-    def generic_visit(self, node):
-        """Called if no explicit visitor function exists for a node."""
-        for field, value in ast.iter_fields(node):
-            if isinstance(value, list):
-                for item in reversed(value):
-                    if isinstance(item, ast.AST):
-                        self.visit(item)
-            elif isinstance(value, ast.AST):
-                self.visit(value)
 
 
 class Completion(tuple):
@@ -1107,17 +971,18 @@ class CodeCompletionWindow:
             style='completion_list.Treeview'
         )
         self.completion_list.column('completion', stretch=True)
-        self.completion_list.column('type', width=120, anchor='e')
+        self.completion_list.column('type', width=100, anchor='e')
         self.completion_list.heading('completion', text='completion')
         self.completion_list.heading('type', text='type')
 
-        color_reg = re.compile(r"^color_(?P<tag>.+)_(?P<fg_or_bg>fg|bg|foreground|background)$")
-        for key, value in idleConf.defaultCfg['extensions'].items('MyIdleExt'):
-            match = color_reg.match(key)
-            if match:
-                options = {{'fg': 'foreground', 'bg': 'background'}.get(match.group('fg_or_bg'),
-                                                                        match.group('fg_or_bg')): value}
-                self.completion_list.tag_configure(match.group('tag'), **options)
+        theme = idleConf.GetOption('main', 'Theme', 'name')
+        self.completion_list.tag_configure('keyword', foreground=idleConf.GetHighlight(theme, 'keyword')['foreground'])
+        self.completion_list.tag_configure('builtin', foreground=idleConf.GetHighlight(theme, 'builtin')['foreground'])
+        self.completion_list.tag_configure('abc', foreground='#333333')
+        self.completion_list.tag_configure('idle', foreground='#ff00ff')
+        self.completion_list.tag_configure('module', foreground='#808040')
+        self.completion_list.tag_configure('package', foreground='#808040')
+        print(self.completion_list.tag_configure('package'))
 
         self.completion_list.pack(side='left', fill='both')
         self.scrollbar = tkinter.ttk.Scrollbar(self.window, command=self.completion_list.yview)
@@ -1209,7 +1074,6 @@ class CodeCompletionWindow:
         for item in self.completion_list.get_children():
             self.completion_list.delete(item)
 
-        # print(self.suggests)
         suggests = [suggest for suggest in self.suggests
                     if match_words(word, list(yield_words(suggest.content)))]
 
