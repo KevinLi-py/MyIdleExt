@@ -192,6 +192,9 @@ import glob
 from code import InteractiveInterpreter
 import keyword
 import builtins
+import types
+import io
+import traceback
 
 try:
     from idlelib.config import idleConf
@@ -394,6 +397,7 @@ class MyIdleExt:
         if has_idle_autocomplete:
             class FakeObject:
                 """“假”对象，允许任何方法调用，不报错，不执行任何操作"""
+
                 def __init__(self, *args, **kwargs):
                     pass
 
@@ -412,6 +416,8 @@ class MyIdleExt:
             self.idle_autocomplete = AutoComplete(editwin)
         else:
             self.idle_autocomplete = None
+
+        self.shell = InteractiveInterpreter()
 
     def expand_brackets_or_quotes(self, event):
         open_bracket = event.char
@@ -637,9 +643,9 @@ class MyIdleExt:
                 return
 
             self.text.after_idle(self.open_completion)
-            if event.char == '.':  # 阻止idle原本的自动提示弹出
-                self.text.insert('insert', '.')
-                return 'break'
+            # if event.char == '.':  # 阻止idle原本的自动提示弹出
+            #     self.text.insert('insert', '.')
+            #     return 'break'
 
     def handle_tab(self, event):
         cursor = self.get_cursor()
@@ -659,7 +665,6 @@ class MyIdleExt:
     def get_suggests(self, expr=None):
         code = self.text.get('1.0', 'end')
         parser = CodeParser(code, self)
-        parser.parse_as_more_as_possible(self.get_cursor().row)
         parser.prepare()
         return parser.get_suggests(expr)
 
@@ -669,6 +674,14 @@ class MyIdleExt:
         self.completion.suggests = self.get_suggests(self.get_expr(self.text.get('insert linestart', 'insert')))
         self.completion.activate()
         return 'break'
+
+
+def ast_eq(left, right):
+    if not isinstance(left, ast.AST) or not isinstance(right, ast.AST):
+        return left == right
+    if type(left) != type(right):
+        return False
+    return all(ast_eq(getattr(left, field), getattr(right, field)) for field in left._fields)
 
 
 class CodeParser:
@@ -681,29 +694,53 @@ class CodeParser:
         # 解析语法时如遇到SyntaxError，尝试在出错位置加入以下字符串，以修复用户在点号后尚未输入标识符的语法错误
         self.fix_empty_identifier = '_fix_empty_identifier_{:04d}_'.format(random.randint(0, 9999))
 
+        self.code_lines = code.splitlines(True)
+        self.line_starts = [0]
+        for i, line in enumerate(self.code_lines):
+            self.line_starts.append(self.line_starts[i] + len(line))
         self.tree = self.parse_as_more_as_possible()
 
     def parse_as_more_as_possible(self, end_lineno=None):
-        code = self.code
-        code_lines = code.splitlines()
+        code_lines = self.code.splitlines(True)
         end_lineno = len(code_lines) if end_lineno is None else end_lineno
         tried_fix = False
         while True:
             try:
-                tree = ast.parse('\n'.join(code_lines[:end_lineno]))
+                # print('parsing', code_lines[:end_lineno])
+                tree = ast.parse(''.join(code_lines[:end_lineno]))
             except SyntaxError as syntax_error:
                 if (not tried_fix) and syntax_error.msg.strip().lower() == 'invalid syntax':
-                    error_line = code_lines[syntax_error.lineno - 1]
-                    code_lines[syntax_error.lineno - 1] = (error_line[syntax_error.offset:]
-                                                           + self.fix_empty_identifier
-                                                           + error_line[:syntax_error.offset])
-                    tried_fix = True
-                    continue
-                else:
-                    end_lineno = syntax_error.lineno - 1
-                    tried_fix = False
+                    # print('Syntax Error')
+                    try:
+                        # 尝试修正点号后面没有标识符的错误
+                        error_line = code_lines[syntax_error.lineno - 1]
+                        start = 0
+
+                        fixed_line = io.StringIO()
+                        index = 0
+                        while index < len(error_line):
+                            index = error_line.find('.', start)
+                            if index == -1:
+                                break
+                            if error_line[index + 1] not in self.master.identifier_chars:
+                                fixed_line.write(error_line[start:index + 1])
+                                fixed_line.write(self.fix_empty_identifier)
+                                start = index + 1
+                        fixed_line.write(error_line[start:])
+                        code_lines[syntax_error.lineno - 1] = fixed_line.getvalue()
+                        # print('Tried fix: ', code_lines[syntax_error.lineno - 1])
+                        tried_fix = True
+                    except:
+                        traceback.print_exc()
+                    else:
+                        continue
+
+                end_lineno = syntax_error.lineno - 1
+                tried_fix = False
             else:
                 break
+
+        # print('Parse result:', ast.dump(tree))
         return tree
 
     def prepare(self):
@@ -721,60 +758,185 @@ class CodeParser:
 
         Visitor().visit(self.tree)
 
-    def find_name(self, target, lineno=None):
-        if lineno is None:
-            lineno = self.code.count('\n')
+    # def parse_expr(self, expr_string, start_lineno=1, start_offset=0):
+    #     brackets = {'(': ')', '[': ']', '{': '}'}
+    #     lineno = start_lineno
+    #     col_offset = start_offset
+    #     node = ast.Expr(lineno=lineno, col_offset=col_offset)
+    #     index = 0
+    #     string_quote = None
+    #     comment = False
+    #
+    #     string_reg = re.compile(r"""(?P<prefix>[bru])?(?P<quote>'''|"""
+    #                             r'''"""|'|").*(?<!(?<!\\)\\)(\\{2})*(?P=quote)''')
+    #     while index < len(expr_string):
+    #         cur_char = expr_string[index]
+    #
+    #         if cur_char == '#':
+    #             comment = True
+    #             index = str.find('\n', index) + 1
+    #             lineno += 1
+    #             col_offset = 0
+    #
+    #         string_match = string_reg.match(expr_string, index)
+    #         if string_match:
+    #             matched_str = string_match.group()
+    #             index += len(matched_str)
+    #             if '\n' not in matched_str:
+    #                 col_offset += len(matched_str)
+    #             else:
+    #                 lineno += matched_str.count('\n')
+    #                 col_offset = len(matched_str) - matched_str.rfind('\n') - 1
+    #
+    #         if cur_char == '\n':
+    #             lineno += 1
+    #             col_offset = 0
+    #         else:
+    #             col_offset += 1
 
-        # Search in imports and fromimports
-        for import_ in reversed(self.imports):
-            if import_.lineno > lineno:
-                continue
+    # def get_node_path_and_end(self, node):
+    #     path = []
+    #     current_node = node
+    #     end_pos = node.lineno, node.col_offset
+    #     changed = True
+    #     while changed:
+    #         changed = False
+    #         next_node = None
+    #         path.append(current_node)
+    #         for field, value in ast.iter_fields(current_node):
+    #             if isinstance(value, list):
+    #                 for item in reversed(value):
+    #                     if isinstance(item, ast.AST):
+    #                         try:
+    #                             if (item.lineno, item.col_offset) > end_pos:
+    #                                 end_pos = item.lineno, item.col_offset
+    #                                 next_node = item
+    #                                 changed = True
+    #                                 break
+    #                         except AttributeError:
+    #                             pass
+    #             elif isinstance(value, ast.AST):
+    #                 try:
+    #                     if (value.lineno, value.col_offset) > end_pos:
+    #                         end_pos = value.lineno, value.col_offset
+    #                         next_node = item
+    #                         changed = True
+    #                 except AttributeError:
+    #                     pass
+    #         if next_node is not None:
+    #             current_node = next_node
+    #         else:
+    #             break
+    #     end_lineno, end_col_offset = end_pos
+    #     start_index = self.line_starts[node.lineno - 1] + node.col_offset
+    #     end_index = self.line_starts[end_lineno - 1] + end_col_offset
+    #     for end_index in range(end_index, len(self.code)):
+    #         ast.parse(self.code[start_index:end_lineno])
 
-            for target in import_.names:
-                import_name = target.asname or target.name
-                if import_name == target:
-                    return 'import', target.name
+    def handle_import(self, name):
+        try:
+            shell = self.master.shell
+            shell.runcode('import ' + name)
+            shell.runcode('_result_ = ' + name)
+            return shell.locals['_result_']
+        except Exception:
+            return None
 
-        for fromimport in reversed(self.fromimports):
-            if fromimport.lineno > lineno:
-                continue
+    def handle_fromimport(self, module, name):
+        try:
+            shell = self.master.shell
+            shell.runcode('from ' + module + ' import ' + name)
+            return shell.locals[name]
+        except Exception:
+            return None
 
-            for target in fromimport.names:
-                import_name = target.asname or target.name
-                if import_name == target:
-                    return 'from', fromimport.module, target.name
+    def parse_node(self, node, node_path):
+        # print('parse_node({}, {})'.format(ast.dump(node), node_path))
+        if isinstance(node, ast.Name):
+            return self.find_name(node.id, node_path)
 
-        # Search others
+        elif isinstance(node, ast.Call):
+            kind, func = self.parse_node(node.func, node_path)
+            if kind == 'instance':
+                if isinstance(func, type):
+                    return 'instance', func
+                result = 'instance', inspect.signature(func).return_annotation
+                if result == inspect._emtpy:
+                    return 'instance', None
+                return 'instance', result
+            elif kind == 'class':
+                return 'class', func
+            elif kind == 'func':
+                result = None
+                parser = self
+
+                class Visitor(ast.NodeVisitor):
+                    def visit_Return(self, node):
+                        nonlocal result
+                        if node.value is not None:
+                            if isinstance(node.value, ast.Constant):
+                                if node.value.value is not None:
+                                    result = 'instance', type(node.value)
+                            else:
+                                return parser.parse_node(node.value, node_path + [func])
+
+                Visitor().visit(node)
+                return result
+
+        elif isinstance(node, ast.Attribute):
+            kind, value = self.parse_node(node.value, node_path)
+            if kind == 'instance':
+                return 'instance', getattr(value, node.attr, None)
+            else:
+                return None, None
+
+    def find_name(self, target, node_path):
         parser = self
 
         class Visitor(ast.NodeVisitor):
-            def __init__(self):
+            def __init__(self, node_path):
                 self.result = None
+                self.node_path = node_path
+
+            def generic_visit(self, node):
+                if self.result is None:
+                    super().generic_visit(node)
+
+            def visit_Import(self, node):
+                for name in node.names:
+                    if (name.name or name.asname) == target:
+                        self.result = 'instance', parser.handle_import(name.name)
+
+            def visit_ImportFrom(self, node):
+                for name in node.names:
+                    if (name.name or name.asname) == target:
+                        self.result = 'instance', parser.handle_fromimport(node.module, name.name)
 
             def visit_FunctionDef(self, node):
                 if node.name == target:
                     self.result = 'func', node
 
-            def visit_Assign(self, node):
+            def visit_ClassDef(self, node):
                 if node.name == target:
-                    self.result = 'var', node
+                    self.result = 'class', node
 
-        visitor = Visitor()
-        visitor.visit(self.tree)
-        result = visitor.result
-        return result
+            def visit_Assign(self, node):
+                for assign_target in node.targets:
+                    if isinstance(assign_target, ast.Name):
+                        if assign_target.id == target:
+                            self.result = parser.parse_node(node, self.node_path)
 
-    @staticmethod
-    def get_return_type(func):
-        if isinstance(func, type):
-            return func
-        elif callable(func):
-            try:
-                return inspect.signature(func).return_annotation
-            except ValueError:
-                return None
-        else:
-            return None
+            def visit_Starred(self, node):
+                if node.value.id == target:
+                    self.result = 'var', list
+
+        for i in range(len(node_path) - 1, -1, -1):
+            visitor = Visitor(node_path[:i])
+            visitor.visit(node_path[i])
+            result = visitor.result
+            if result is not None:
+                return result
+        return None, None
 
     def get_node_path(self, line, offset):
         path = []
@@ -803,7 +965,41 @@ class CodeParser:
             else:
                 return path
 
+    def get_instance_attrs_by_class(self, node):
+        class InstanceAttrCollector(ast.NodeVisitor):
+            def __init__(self):
+                self.results = set()
+
+            def visit_Lambda(self, node):
+                pass
+
+            def visit_DictComp(self, node):
+                pass
+
+            def visit_GeneratorExp(self, node):
+                pass
+
+            def visit_ListComp(self, node):
+                pass
+
+            def visit_SetComp(self, node):
+                pass
+
+            def visit_ClassDef(self, node):
+                pass
+
+            def visit_Attribute(self, node):
+                if isinstance(node.value, ast.Name):
+                    if node.value.id == 'self':
+                        self.results.add(Completion((node.value.attr, 'attribute')))
+
+        collector = InstanceAttrCollector()
+        collector.visit(node)
+        return collector.results
+
     def get_variables(self, node_path):
+        parser = self
+
         class ScopeVariableCollector(ReversedNodeVisitor):
             """访问一个节点，收集其中定义的所有变量，不包括其中的子作用域"""
 
@@ -850,14 +1046,17 @@ class CodeParser:
             def visit_ClassDef(self, node):
                 self.register_var(node.name, 'class')
 
-            def register_var(self, name, type='variable'):
+            def register_var(self, name, kind='variable'):
+
                 if name is None:
                     return
                 if isinstance(name, (list, tuple)):
                     for n in name:
-                        self.results.add(Completion((n, type)))
+                        self.register_var(n, kind)
+                elif isinstance(name, ast.arg):
+                    self.results.add(Completion((name.arg, kind)))
                 else:
-                    self.results.add(Completion((name, type)))
+                    self.results.add(Completion((name, kind)))
 
             def visit_Lambda(self, node):
                 pass
@@ -882,6 +1081,8 @@ class CodeParser:
                     collector.register_var(node.args.kwonlyargs, 'parameter')
                     collector.register_var(node.args.vararg, 'parameter')
                     collector.register_var(node.args.kwarg, 'parameter')
+                elif isinstance(node, ast.Module):
+                    collector.register_var(('__doc__', '__name__'))
                 collector.visit(node)
                 return collector.results
 
@@ -1010,6 +1211,59 @@ class CodeParser:
         else:
             return set()
 
+    def get_attrs_and_more(self, expr='', node_path=()):
+        try:
+            node_path = node_path[:]
+            hyper_parser = HyperParser(self.master.window, 'insert')
+            curline = self.master.text.get('insert linestart', 'insert')
+            i = j = len(curline)
+            while i and (curline[i - 1] in self.master.identifier_chars or ord(curline[i - 1]) > 127):
+                i -= 1
+            if i and curline[i - 1] == '.':
+                hyper_parser.set_index("insert-%dc" % (len(curline) - (i - 1)))
+            else:
+                return
+
+            expr_string = hyper_parser.get_expression()
+            # print('expr: ', expr_string)
+            expr = ast.parse(expr_string).body[0].value
+            # print(ast.dump(expr))
+            # print(*[ast.dump(node) for node in node_path], sep='\n')
+            while node_path:
+                if ast_eq(node_path[-1], expr):
+                    break
+                node_path.pop()
+
+            # print(*[ast.dump(node) for node in node_path], sep='\n')
+            kind, obj = self.parse_node(expr, node_path)
+            # print(kind, obj)
+            if kind == 'instance':
+                results = set()
+                for key in dir(obj) + getattr(obj, '__slots__', []):
+                    # print('Processing', key)
+                    value = getattr(obj, key, None)
+                    if isinstance(value, type):
+                        results.add(Completion((key, 'class')))
+                    elif isinstance(value, types.GetSetDescriptorType):
+                        results.add(Completion((key, 'descriptor')))
+                    elif isinstance(obj, type) and isinstance(value, (types.MethodType, classmethod, staticmethod)):
+                        results.add(Completion((key + '()', 'method')))
+                    elif callable(value):
+                        results.add(Completion((key + '()', 'function')))
+                    else:
+                        results.add(Completion((key, 'attr')))
+                # print(results)
+                return results
+            elif kind == 'class':
+                return self.get_variables([obj]) | self.get_instance_attrs_by_class(obj)
+            else:
+                return set()
+
+        except (LookupError, AttributeError, SyntaxError, ValueError, TypeError):
+            import traceback
+            traceback.print_exc()
+            return set()
+
     def get_suggests(self, expr):
         cursor = self.master.get_cursor()
         # expr = self.master.get_expr(self.master.text.get('1.0', cursor))
@@ -1017,17 +1271,28 @@ class CodeParser:
         completions = set()
         current_line = self.master.text.get('insert linestart', 'insert').strip()
         if current_line.startswith(('import', 'from')):
+            # print('fetching modules')
             completions.update(self.get_modules(expr))
         else:
             if expr is not None and '.' not in expr:
+                # print('fetching keywords')
                 completions.update(self.get_keywords(expr, node_path))
+                # print('fetching builtins')
                 completions.update(self.get_builtins(expr, node_path))
                 if len(node_path) > 0:
+                    # print('fetching variables')
                     completions.update(self.get_variables(node_path))
             elif expr is not None and '.' in expr:
+                # if len(node_path) > 1:
+                #     completions.update(self.get_attrs_and_more(expr, node_path))
+                # print('fetching attr')
+                completions.update(self.get_attrs_and_more(expr, node_path))
+                # print('fetching idle')
                 completions.update(self.get_idle_suggests(expr))
+            # print('fetching words')
             completions.update(self.get_words(expr))
-        return completions
+
+        return sorted(completion for completion in completions if completion.clean_content != self.fix_empty_identifier)
 
 
 class ReversedNodeVisitor(object):
