@@ -195,6 +195,14 @@ import builtins
 import types
 import io
 import traceback
+import logging
+import traceback_gui
+
+# import pdb
+# breakpoint = pdb.set_trace
+
+traceback_gui.set_hook()
+sys.excepthook = traceback_gui.excepthook
 
 try:
     from idlelib.config import idleConf
@@ -669,11 +677,14 @@ class MyIdleExt:
         return parser.get_suggests(expr)
 
     def open_completion(self, event=None):
-        if self.completion.is_active:
-            return
-        self.completion.suggests = self.get_suggests(self.get_expr(self.text.get('insert linestart', 'insert')))
-        self.completion.activate()
-        return 'break'
+        try:
+            if self.completion.is_active:
+                return
+            self.completion.suggests = self.get_suggests(self.get_expr(self.text.get('insert linestart', 'insert')))
+            self.completion.activate()
+            return 'break'
+        except:
+            traceback_gui.show_traceback()
 
 
 def ast_eq(left, right):
@@ -851,7 +862,9 @@ class CodeParser:
             return None
 
     def parse_node(self, node, node_path):
-        # print('parse_node({}, {})'.format(ast.dump(node), node_path))
+        # breakpoint()
+        logging.debug('parse_node({}, {})'.format(ast.dump(node), [ast.dump(node) for node in node_path]))
+
         if isinstance(node, ast.Name):
             return self.find_name(node.id, node_path)
 
@@ -881,7 +894,10 @@ class CodeParser:
                                 return parser.parse_node(node.value, node_path + [func])
 
                 Visitor().visit(node)
-                return result
+                if result is None:
+                    return None, None
+                else:
+                    return result
 
         elif isinstance(node, ast.Attribute):
             kind, value = self.parse_node(node.value, node_path)
@@ -890,7 +906,20 @@ class CodeParser:
             else:
                 return None, None
 
+        elif isinstance(node, getattr(ast, 'Constant', (ast.Str, ast.Bytes, ast.Num, ast.NameConstant))):
+            return 'instance', ast.literal_eval(node)
+
+        elif isinstance(node, (ast.List, ast.Set, ast.Tuple, ast.Dict)):
+            try:
+                return 'instance', ast.literal_eval(node)
+            except ValueError:
+                return 'instance', {ast.List: list, ast.Set: set,
+                                    ast.Tuple: tuple, ast.Dict: dict}.get(type(node), None)
+
+        return None, None
+
     def find_name(self, target, node_path):
+        logging.debug('find_name({!r}, {})'.format(target, [ast.dump(node) for node in node_path]))
         parser = self
 
         class Visitor(ast.NodeVisitor):
@@ -921,20 +950,21 @@ class CodeParser:
                     self.result = 'class', node
 
             def visit_Assign(self, node):
+                # logging.debug('find_name:visit_Assign({})'.format(ast.dump(node)))
                 for assign_target in node.targets:
                     if isinstance(assign_target, ast.Name):
                         if assign_target.id == target:
-                            self.result = parser.parse_node(node, self.node_path)
+                            self.result = parser.parse_node(node.value, self.node_path)
 
             def visit_Starred(self, node):
                 if node.value.id == target:
-                    self.result = 'var', list
+                    self.result = 'instance', list
 
         for i in range(len(node_path) - 1, -1, -1):
-            visitor = Visitor(node_path[:i])
-            visitor.visit(node_path[i])
+            visitor = Visitor(node_path[:i + 1])
+            visitor.generic_visit(node_path[i])
             result = visitor.result
-            if result is not None:
+            if result is not None and result[0] is not None:
                 return result
         return None, None
 
@@ -998,6 +1028,7 @@ class CodeParser:
         return collector.results
 
     def get_variables(self, node_path):
+        # logging.debug('get_variables({})'.format([ast.dump(node) for node in node_path]))
         parser = self
 
         class ScopeVariableCollector(ReversedNodeVisitor):
@@ -1075,6 +1106,7 @@ class CodeParser:
 
             @classmethod
             def collect(cls, node):
+                # logging.debug('ScopeVariableCollector: collecting {}'.format(ast.dump(node)))
                 collector = cls()
                 if isinstance(node, (ast.Lambda, ast.FunctionDef)):
                     collector.register_var(node.args.args, 'parameter')
@@ -1083,7 +1115,7 @@ class CodeParser:
                     collector.register_var(node.args.kwarg, 'parameter')
                 elif isinstance(node, ast.Module):
                     collector.register_var(('__doc__', '__name__'))
-                collector.visit(node)
+                collector.generic_visit(node)
                 return collector.results
 
         results = set()
@@ -1189,6 +1221,26 @@ class CodeParser:
 
         return suggests
 
+    def get_from_imports(self, current_line, node_path=()):
+        module = self.from_import_pattern.match(current_line).group('module')
+        try:
+            self.master.shell.runcode('import {}'.format(module))
+            self.master.shell.runcode('_result_ = {}'.format(module))
+            module = self.master.shell.locals['_result_']
+            suggests = set()
+            for key in dir(module):
+                value = getattr(module, key)
+                if isinstance(value, type):
+                    suggests.add(Completion((key, 'class')))
+                elif callable(value):
+                    suggests.add(Completion((key, 'function')))
+                else:
+                    suggests.add(Completion((key, 'variable')))
+            # print(suggests)
+            return suggests
+        except Exception:
+            return set()
+
     def get_idle_suggests(self, expr=None, node_path=()):
         if has_idle_autocomplete:
             hp = HyperParser(self.master.window, "insert")
@@ -1205,6 +1257,9 @@ class CodeParser:
                     return
             else:
                 comp_what = ""
+
+            if '(' in comp_what:
+                return set()
 
             comp_lists = self.master.idle_autocomplete.fetch_completions(comp_what, COMPLETE_ATTRIBUTES)
             return {Completion((completion, 'idle')) for completion in comp_lists[1]}
@@ -1260,9 +1315,10 @@ class CodeParser:
                 return set()
 
         except (LookupError, AttributeError, SyntaxError, ValueError, TypeError):
-            import traceback
-            traceback.print_exc()
+            # traceback_gui.show_traceback()
             return set()
+
+    from_import_pattern = re.compile(r"from[ ]+(?P<module>(?:\.|\w)+)[ ]+import (\n|\w|[() ,.])+$")
 
     def get_suggests(self, expr):
         cursor = self.master.get_cursor()
@@ -1270,9 +1326,15 @@ class CodeParser:
         node_path = self.get_node_path(*cursor)
         completions = set()
         current_line = self.master.text.get('insert linestart', 'insert').strip()
-        if current_line.startswith(('import', 'from')):
+
+        if self.from_import_pattern.match(current_line):
+            completions.update(self.get_from_imports(current_line))
+        elif current_line.startswith(('import', 'from')):
             # print('fetching modules')
             completions.update(self.get_modules(expr))
+            if current_line.startswith('from'):
+                completions.add(Completion(('import ', 'keyword')))
+
         else:
             if expr is not None and '.' not in expr:
                 # print('fetching keywords')
@@ -1403,12 +1465,12 @@ class CodeCompletionWindow:
     def activate(self):
         if self.is_active:
             return
-        self.window.wm_deiconify()
         self.parent_text_bind('<Up>', self.prev, add=True)
         self.parent_text_bind('<Down>', self.next, add=True)
         self.parent_text_bind('<Return>', self.choose, add=True)
         self.parent_text_bind('<KeyRelease>', self.filter_completions, add=True)
         self.parent_text_bind('<BackSpace>', self.update_event, add=True)
+        self.window.wm_deiconify()
 
         self.is_active = True
 
@@ -1560,3 +1622,6 @@ def match_words(pattern, words):
                 return True
         else:
             return False
+
+
+# logging.basicConfig(level=logging.DEBUG)
