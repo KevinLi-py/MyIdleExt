@@ -299,9 +299,6 @@ except (ImportError, ValueError):
     autopep8 = None
 
 
-breakpoint = pdb.set_trace
-
-
 def split_index(string):
     return [int(value) for value in string.split('.')]
 
@@ -1790,4 +1787,3 @@ def match_words(pattern, words):
                 return True
         else:
             return False
-
