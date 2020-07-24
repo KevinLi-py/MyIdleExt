@@ -1,23 +1,40 @@
 """
 MyIdleExt -- My Idle Extension
 ------------------------------
-This is a idle extension which provides code completion, brackets/quotes completion and more features.
+This is a idle extension which provides code completion,
+brackets/quotes completion and more features.
 This file should be loaded by idlelib.
 In this way, it will provide the features mentioned above.
 Otherwise, if you run this file as `__main__` (Run directly),
 you can do some operations such as install and uninstall.
 """
+import logging
+import traceback
+import io
+import types
+import builtins
+import keyword
+from code import InteractiveInterpreter
+import glob
+import inspect
+import ast
+import tempfile
+import tkinter.ttk
+import tkinter.messagebox
+import tkinter
+import random
+import string
 import re
 import os
 import sys
 
-version = _version_ = '0.2.0'
+version = _version_ = '0.3.0'
 
 config_extension_def = """
 [MyIdleExt]
-enable=1
-enable_editor=1
-enable_shell=0
+enable=True
+enable_editor=True
+enable_shell=False
 color_keyword_fg = #ff7700
 color_builtin_fg = #900090
 color_idle_fg = #ff00ff
@@ -40,13 +57,19 @@ def on_run_as_main():
     import traceback
     import argparse
     import configparser
+    try:
+        from idlelib.config import idleConf
+    except ImportError:
+        from idlelib.configHandler import idleConf
 
     def find_idlelib():
         for path in sys.path:
             try:
                 for directory in os.listdir(path):
-                    if directory == 'idlelib' and os.path.isdir(os.path.join(path, directory)):
-                        config_extension_filename = os.path.join(path, directory, 'config-extensions.def')
+                    if (directory == 'idlelib' and
+                            os.path.isdir(os.path.join(path, directory))):
+                        config_extension_filename = os.path.join(
+                            path, directory, 'config-extensions.def')
                         if os.path.isfile(config_extension_filename):
                             return os.path.join(path, 'idlelib')
             except OSError:
@@ -55,24 +78,70 @@ def on_run_as_main():
         sys.exit()
 
     arg_parser = argparse.ArgumentParser('MyIdleExt', description=__doc__)
-    subparsers_group = arg_parser.add_subparsers(title='Commands', dest='command', metavar='<command>')
+    subparsers_group = arg_parser.add_subparsers(
+        title='Commands', dest='command', metavar='<command>')
 
-    command_install = subparsers_group.add_parser('install', help='Install MyIdleExt for your idle. '
-                                                                  'You might need to restart idle to apply. ')
-    command_install.add_argument('--path', help='The path of idlelib to install MyIdleExt. '
-                                                'If is not specified, program will search it in `sys.path`. ',
-                                 default='')
-    command_install.add_argument('--sure', action='store_const', const=True, default=False,
-                                 help='If it is already installed, do not ask if the user want to overwrite. ')
+    command_install = subparsers_group.add_parser(
+        'install',
+        help='Install MyIdleExt for your idle. '
+        'You might need to restart idle to apply. '
+    )
+    command_install.add_argument(
+        '--path',
+        help='The path of idlelib to install MyIdleExt. '
+        'If is not specified, program will search it in `sys.path`. ',
+        default=''
+    )
+    command_install.add_argument('--sure', action='store_const',
+                                 const=True, default=False,
+                                 help='If it is already installed, '
+                                 'do not ask if the user want to overwrite. ')
+    which_config = command_install.add_mutually_exclusive_group()
+    which_config.add_argument('--user', action='store_const', const=['user'],
+                              dest='which_config',
+                              help='Enable for the current user. ',
+                              default=['user'])
+    which_config.add_argument('--default', action='store_const',
+                              const=['default'], dest='which_config',
+                              help='Enable for the default idle configure. ',
+                              default=['user'])
+    which_config.add_argument(
+        '--both', action='store_const',
+        const=['user', 'default'], default=['user'],
+        dest='which_config',
+        help='Enable for both the current user and the default. '
+    )
 
-    command_uninstall = subparsers_group.add_parser('uninstall', help='Uninstall MyIdleExt for your idle')
-    command_uninstall.add_argument('--path', help='The path of idlelib to uninstall MyIdleExt. '
-                                                  'If is not specified, program will search it in `sys.path`. ',
-                                   default='')
-    command_uninstall.add_argument('--sure', action='store_const', const=True, default=False,
-                                   help='Do not ask if the user really want to uninstall. ')
+    command_uninstall = subparsers_group.add_parser(
+        'uninstall', help='Uninstall MyIdleExt for your idle')
+    command_uninstall.add_argument(
+        '--path',
+        help='The path of idlelib to uninstall MyIdleExt. '
+        'If is not specified, program will search it in `sys.path`. ',
+        default=''
+    )
+    command_uninstall.add_argument(
+        '--sure', action='store_const',
+        const=True, default=False,
+        help='Do not ask if the user really want to uninstall. '
+    )
+    which_config = command_uninstall.add_mutually_exclusive_group()
+    which_config.add_argument('--user', action='store_const',
+                              const=['user'], dest='which_config',
+                              help='Disable for the current user. ',
+                              default=['user'])
+    which_config.add_argument('--default', action='store_const',
+                              const=['default'], dest='which_config',
+                              help='Disable for the default idle configure. ',
+                              default=['user'])
+    which_config.add_argument('--both', action='store_const',
+                              const=['user', 'default'], default=['user'],
+                              dest='which_config',
+                              help='Disable for both the current user'
+                                   ' and the default. ')
 
-    subparsers_group.add_parser('version', help='Show the version of MyIdleExt. ')
+    subparsers_group.add_parser('version',
+                                help='Show the version of MyIdleExt. ')
 
     def is_installed(idle_path):
         return os.path.isfile(os.path.join(idle_path, 'MyIdleExt.py'))
@@ -86,6 +155,13 @@ def on_run_as_main():
                 return False
             else:
                 print("Please input 'y' or 'n'. Try again. ")
+
+    def get_idle_ext_config_path(which):
+        if which == 'default':
+            return os.path.join(find_idlelib(), 'config-extensions.def')
+        elif which == 'user':
+            return os.path.join(idleConf.GetUserCfgDir(),
+                                'config-extensions.def')
 
     def install(this, args):
         if args.path == '':
@@ -101,16 +177,19 @@ def on_run_as_main():
             pass
         default_config = configparser.ConfigParser()
         default_config.read_string(config_extension_def)
-        idle_config = configparser.ConfigParser()
-        idle_config.read(os.path.join(args.path, 'config-extensions.def'))
-        for section in default_config.sections():
-            if not idle_config.has_section(section):
-                idle_config.add_section(section)
-            for key, value in default_config.items(section):
-                idle_config.set(section, key, value)
 
-        with open(os.path.join(args.path, 'config-extensions.def'), 'w') as fp:
-            idle_config.write(fp)
+        for which_config in args.which_config:
+            config_path = get_idle_ext_config_path(which_config)
+            idle_config = configparser.ConfigParser()
+            idle_config.read(config_path)
+            for section in default_config.sections():
+                if not idle_config.has_section(section):
+                    idle_config.add_section(section)
+                for key, value in default_config.items(section):
+                    idle_config.set(section, key, value)
+
+            with open(config_path, 'w') as fp:
+                idle_config.write(fp)
 
         print('MyIdleExt installed successfully. ')
 
@@ -121,19 +200,23 @@ def on_run_as_main():
             print('MyIdleExt is not installed. ')
             return
         if not args.sure:
-            if not ask_yes_no('Are you sure to uninstall MyIdleExt in "{}"?'.format(args.path)):
+            if not ask_yes_no('Are you sure to uninstall MyIdleExt in "{}"?'
+                              .format(args.path)):
                 print('Operation canceled. ')
         os.remove(os.path.join(args.path, 'MyIdleExt.py'))
         default_config = configparser.ConfigParser()
         default_config.read_string(config_extension_def)
-        idle_config = configparser.ConfigParser()
-        idle_config.read(os.path.join(args.path, 'config-extensions.def'))
-        for section in default_config.sections():
-            if idle_config.has_section(section):
-                idle_config.remove_section(section)
 
-        with open(os.path.join(args.path, 'config-extensions.def'), 'w') as fp:
-            idle_config.write(fp)
+        for which_config in args.which_config:
+            config_path = get_idle_ext_config_path(which_config)
+            idle_config = configparser.ConfigParser()
+            idle_config.read(config_path)
+            for section in default_config.sections():
+                if idle_config.has_section(section):
+                    idle_config.remove_section(section)
+
+            with open(config_path, 'w') as fp:
+                idle_config.write(fp)
 
         print('MyIdleExt uninstalled successfully. ')
 
@@ -147,7 +230,8 @@ def on_run_as_main():
         print("You did not give any arguments in the command line. ")
         print('But do not be worried -- you can input here. ')
         print('Type `all` for all commands, `help` for help, '
-              '`<command> -h` for help with the specifiesd command, or `quit` to quit ')
+              '`<command> -h` for help with the specifiesd command, '
+              'or `quit` to quit ')
         pattern = re.compile(r'"[^"]*"|[^ "]*')
 
         while True:
@@ -161,7 +245,11 @@ def on_run_as_main():
                 arg_parser.print_help()
             else:
                 try:
-                    args = arg_parser.parse_args([arg.strip('"') for arg in pattern.findall(command) if arg.strip()])
+                    args = arg_parser.parse_args([
+                        arg.strip('"')
+                        for arg in pattern.findall(command)
+                        if arg.strip()
+                    ])
                     if args.command is None:
                         print('Please input a command')
                     else:
@@ -180,29 +268,6 @@ if __name__ == '__main__':
     on_run_as_main()
     sys.exit()
 
-import string
-import random
-import tkinter
-import tkinter.messagebox
-import tkinter.ttk
-import tempfile
-import ast
-import inspect
-import glob
-from code import InteractiveInterpreter
-import keyword
-import builtins
-import types
-import io
-import traceback
-import logging
-import traceback_gui
-
-# import pdb
-# breakpoint = pdb.set_trace
-
-traceback_gui.set_hook()
-sys.excepthook = traceback_gui.excepthook
 
 try:
     from idlelib.config import idleConf
@@ -216,11 +281,14 @@ except ImportError:
 
 has_idle_autocomplete = True
 try:
-    from idlelib.autocomplete import AutoComplete, HyperParser, ATTRS as COMPLETE_ATTRIBUTES
+    from idlelib.autocomplete import (AutoComplete, HyperParser,
+                                      ATTRS as COMPLETE_ATTRIBUTES)
     from idlelib import autocomplete
 except ImportError:
     try:
-        from idlelib.AutoComplete import AutoComplete, HyperParser, COMPLETE_ATTRIBUTES
+        from idlelib.AutoComplete import (AutoComplete,
+                                          HyperParser,
+                                          COMPLETE_ATTRIBUTES)
         from idlelib import AutoComplete as autocomplete
     except ImportError:
         has_idle_autocomplete = False
@@ -229,6 +297,9 @@ try:
     import autopep8
 except (ImportError, ValueError):
     autopep8 = None
+
+
+breakpoint = pdb.set_trace
 
 
 def split_index(string):
@@ -318,21 +389,21 @@ class TextIndex:
             raise AttributeError(item)
 
     def __lt__(self, other):
-        # print('{} < {}'.format(self, other))
+
         if isinstance(other, TextIndex):
             return (self.row, self.column) < (other.row, other.column)
         elif isinstance(other, (str, tuple, list)) or hasattr(other, 'string'):
             return self < TextIndex(other)
 
     def __eq__(self, other):
-        # print('{} == {}'.format(self, other))
+
         if isinstance(other, TextIndex):
             return (self.row, self.column) == (other.row, other.column)
         elif isinstance(other, (str, tuple, list)) or hasattr(other, 'string'):
             return self == TextIndex(other)
 
     def __gt__(self, other):
-        # print('{} > {}'.format(self, other))
+
         if isinstance(other, TextIndex):
             return (self.row, self.column) > (other.row, other.column)
         elif isinstance(other, (str, tuple, list)) or hasattr(other, 'string'):
@@ -395,7 +466,9 @@ class MyIdleExt:
         self.text.bind('<Key-}>', self.handle_close_bracket)
 
         self.text.bind('<<format-pep8>>', self.format_pep8)
-        self.text.bind(idleConf.GetOption('extensions', 'MyIdleExt_cfgBindings', 'format-pep8'), self.format_pep8)
+        self.text.bind(idleConf.GetOption(
+            'extensions', 'MyIdleExt_cfgBindings', 'format-pep8'),
+            self.format_pep8)
 
         self.completion = CodeCompletionWindow(self, self.window.top)
 
@@ -453,12 +526,15 @@ class MyIdleExt:
             if in_string:
                 start, end = in_string
 
-                return self.handle_close_quote(quote, next_char, cursor, start, end)
+                return self.handle_close_quote(quote, next_char,
+                                               cursor, start, end)
 
             else:
                 two_chars_before = self.text.get(cursor - 2, cursor)
 
-                if len(two_chars_before) >= 2 and two_chars_before[0] == two_chars_before[1] == quote:  # 开启三引号字符串
+                # 开启三引号字符串
+                if (len(two_chars_before) >= 2 and
+                        two_chars_before[0] == two_chars_before[1] == quote):
                     self.text.insert(cursor, quote * 4)
                     self.text.mark_set('insert', cursor + 1)
                     return 'break'
@@ -519,7 +595,8 @@ class MyIdleExt:
             # two_chars_before = self.text.get(cursor + '-4c', cursor + '-2c')
             #
             # if other_two_quote == close_bracket * 2:
-            #     if two_chars_before[1] == '\\' and two_chars_before[0] != '\\':
+            #     if (two_chars_before[1] == '\\' and
+            #             two_chars_before[0] != '\\'):
             #         return  # 转义
             #     else:
             #         return  # 闭合该字符串
@@ -529,7 +606,7 @@ class MyIdleExt:
             return  # 以上每种情况都不做处理
 
     def handle_backspace(self, event):
-        # print('handle_backspace')
+
         cursor = self.get_cursor()
         deleting_char = self.text.get(cursor - 1)
         if deleting_char in '{[(':
@@ -568,15 +645,15 @@ class MyIdleExt:
                 return 'break'
 
     def position_in_tags(self, cursor, tags=('STRING', 'COMMENT')):
-        # print('position_in_tags({!r}, {!r})'.format(cursor, tags))
+
         exclude_ranges = sum((self.text.tag_ranges(tag) for tag in tags), ())
         for start, stop in every_two(exclude_ranges):
             start_index = TextIndex(start)
             stop_index = TextIndex(stop)
-            # print('values', start_index, cursor, stop_index)
+
             if start_index <= cursor < stop_index:
                 return start_index, stop_index
-            # print('Now cursor is', cursor)
+
         else:
             return None
 
@@ -594,7 +671,9 @@ class MyIdleExt:
         return TextIndex(self.text.index('insert'))
 
     def parse_quote_type(self, string_start_pos):
-        quote_start = self.text.get(string_start_pos, string_start_pos + 6).strip(string.ascii_letters)  # 去除字符串前缀
+        # 去除字符串前缀
+        quote_start = (self.text.get(string_start_pos, string_start_pos + 6)
+                       .strip(string.ascii_letters))
         if quote_start[:3] == "'''":
             return "'''"
         elif quote_start[:3] == '"""':
@@ -613,10 +692,13 @@ class MyIdleExt:
                 import autopep8
             except (ImportError, ValueError):
                 tkinter.Tk().withdraw()
-                tkinter.messagebox.showerror('autopep8 Is Not Installed',
-                                             'Cannot pretty-format your code, because autopep8 is not installed. '
-                                             'Install it by run command "python -m pip install autopep8", '
-                                             'and then restart IDLE.')
+                tkinter.messagebox.showerror(
+                    'autopep8 Is Not Installed',
+                    'Cannot pretty-format your code, '
+                    'because autopep8 is not installed. '
+                    'Install it by run command '
+                    '"python -m pip install autopep8", '
+                    'and then restart IDLE.')
                 return
         try:
             raw_code = self.text.get('1.0', 'end')
@@ -624,7 +706,8 @@ class MyIdleExt:
                 filename = os.path.join(directory, 'temp.py')
                 with open(filename, 'w', encoding='utf-8') as fp:
                     fp.write(raw_code)
-                autopep8.main(['autopep8.py', filename, '--in-place', '--aggressive', '--aggressive'])
+                autopep8.main(['autopep8.py', filename,
+                               '--in-place', '--aggressive', '--aggressive'])
                 with open(filename, 'r', encoding='utf-8') as fp:
                     formatted_code = fp.read()
 
@@ -635,7 +718,7 @@ class MyIdleExt:
             traceback.print_exc()
 
     def handle_key(self, event):
-        # print(vars(event))
+
         if event.char == '':
             return
 
@@ -658,7 +741,8 @@ class MyIdleExt:
     def handle_tab(self, event):
         cursor = self.get_cursor()
         text_before = self.text.get(cursor.line_start, cursor).strip()
-        if text_before != '' and (self.completion.get_word() != '' or text_before[-1] == '.'):
+        if text_before != '' and (self.completion.get_word() != ''
+                                  or text_before[-1] == '.'):
             self.text.after_idle(self.open_completion)
             return 'break'
 
@@ -680,11 +764,12 @@ class MyIdleExt:
         try:
             if self.completion.is_active:
                 return
-            self.completion.suggests = self.get_suggests(self.get_expr(self.text.get('insert linestart', 'insert')))
+            self.completion.suggests = self.get_suggests(
+                self.get_expr(self.text.get('insert linestart', 'insert')))
             self.completion.activate()
             return 'break'
-        except:
-            traceback_gui.show_traceback()
+        except Exception:
+            traceback.print_exc()
 
 
 def ast_eq(left, right):
@@ -692,7 +777,8 @@ def ast_eq(left, right):
         return left == right
     if type(left) != type(right):
         return False
-    return all(ast_eq(getattr(left, field), getattr(right, field)) for field in left._fields)
+    return all(ast_eq(getattr(left, field), getattr(right, field))
+               for field in left._fields)
 
 
 class CodeParser:
@@ -703,7 +789,8 @@ class CodeParser:
 
         self.master = master
         # 解析语法时如遇到SyntaxError，尝试在出错位置加入以下字符串，以修复用户在点号后尚未输入标识符的语法错误
-        self.fix_empty_identifier = '_fix_empty_identifier_{:04d}_'.format(random.randint(0, 9999))
+        self.fix_empty_identifier = '_fix_empty_identifier_{:04d}_'.format(
+            random.randint(0, 9999))
 
         self.code_lines = code.splitlines(True)
         self.line_starts = [0]
@@ -712,16 +799,18 @@ class CodeParser:
         self.tree = self.parse_as_more_as_possible()
 
     def parse_as_more_as_possible(self, end_lineno=None):
+
         code_lines = self.code.splitlines(True)
         end_lineno = len(code_lines) if end_lineno is None else end_lineno
         tried_fix = False
         while True:
             try:
-                # print('parsing', code_lines[:end_lineno])
+
                 tree = ast.parse(''.join(code_lines[:end_lineno]))
             except SyntaxError as syntax_error:
-                if (not tried_fix) and syntax_error.msg.strip().lower() == 'invalid syntax':
-                    # print('Syntax Error')
+                if ((not tried_fix) and
+                        syntax_error.msg.strip().lower() == 'invalid syntax'):
+
                     try:
                         # 尝试修正点号后面没有标识符的错误
                         error_line = code_lines[syntax_error.lineno - 1]
@@ -733,15 +822,17 @@ class CodeParser:
                             index = error_line.find('.', start)
                             if index == -1:
                                 break
-                            if error_line[index + 1] not in self.master.identifier_chars:
+                            if (error_line[index + 1]
+                                    not in self.master.identifier_chars):
                                 fixed_line.write(error_line[start:index + 1])
                                 fixed_line.write(self.fix_empty_identifier)
-                                start = index + 1
+                            start = index + 1
                         fixed_line.write(error_line[start:])
-                        code_lines[syntax_error.lineno - 1] = fixed_line.getvalue()
-                        # print('Tried fix: ', code_lines[syntax_error.lineno - 1])
+                        code_lines[syntax_error.lineno -
+                                   1] = fixed_line.getvalue()
+
                         tried_fix = True
-                    except:
+                    except Exception:
                         traceback.print_exc()
                     else:
                         continue
@@ -751,7 +842,6 @@ class CodeParser:
             else:
                 break
 
-        # print('Parse result:', ast.dump(tree))
         return tree
 
     def prepare(self):
@@ -797,7 +887,8 @@ class CodeParser:
     #                 col_offset += len(matched_str)
     #             else:
     #                 lineno += matched_str.count('\n')
-    #                 col_offset = len(matched_str) - matched_str.rfind('\n') - 1
+    #                 col_offset = (len(matched_str)
+    #                               - matched_str.rfind('\n') - 1)
     #
     #         if cur_char == '\n':
     #             lineno += 1
@@ -862,8 +953,9 @@ class CodeParser:
             return None
 
     def parse_node(self, node, node_path):
-        # breakpoint()
-        logging.debug('parse_node({}, {})'.format(ast.dump(node), [ast.dump(node) for node in node_path]))
+
+        logging.debug('parse_node({}, {})'.format(
+            ast.dump(node), [ast.dump(node) for node in node_path]))
 
         if isinstance(node, ast.Name):
             return self.find_name(node.id, node_path)
@@ -891,7 +983,10 @@ class CodeParser:
                                 if node.value.value is not None:
                                     result = 'instance', type(node.value)
                             else:
-                                return parser.parse_node(node.value, node_path + [func])
+                                return parser.parse_node(
+                                    node.value,
+                                    node_path + [func]
+                                )
 
                 Visitor().visit(node)
                 if result is None:
@@ -906,20 +1001,28 @@ class CodeParser:
             else:
                 return None, None
 
-        elif isinstance(node, getattr(ast, 'Constant', (ast.Str, ast.Bytes, ast.Num, ast.NameConstant))):
+        elif isinstance(
+                node,
+                getattr(ast, 'Constant',
+                        (ast.Str, ast.Bytes, ast.Num, ast.NameConstant))):
             return 'instance', ast.literal_eval(node)
 
         elif isinstance(node, (ast.List, ast.Set, ast.Tuple, ast.Dict)):
             try:
                 return 'instance', ast.literal_eval(node)
             except ValueError:
-                return 'instance', {ast.List: list, ast.Set: set,
-                                    ast.Tuple: tuple, ast.Dict: dict}.get(type(node), None)
+                return 'instance', {
+                    ast.List: list,
+                    ast.Set: set,
+                    ast.Tuple: tuple,
+                    ast.Dict: dict
+                }.get(type(node), None)
 
         return None, None
 
     def find_name(self, target, node_path):
-        logging.debug('find_name({!r}, {})'.format(target, [ast.dump(node) for node in node_path]))
+        logging.debug('find_name({!r}, {})'.format(
+            target, [ast.dump(node) for node in node_path]))
         parser = self
 
         class Visitor(ast.NodeVisitor):
@@ -934,12 +1037,14 @@ class CodeParser:
             def visit_Import(self, node):
                 for name in node.names:
                     if (name.name or name.asname) == target:
-                        self.result = 'instance', parser.handle_import(name.name)
+                        self.result = 'instance', parser.handle_import(
+                            name.name)
 
             def visit_ImportFrom(self, node):
                 for name in node.names:
                     if (name.name or name.asname) == target:
-                        self.result = 'instance', parser.handle_fromimport(node.module, name.name)
+                        self.result = 'instance', parser.handle_fromimport(
+                            node.module, name.name)
 
             def visit_FunctionDef(self, node):
                 if node.name == target:
@@ -954,7 +1059,8 @@ class CodeParser:
                 for assign_target in node.targets:
                     if isinstance(assign_target, ast.Name):
                         if assign_target.id == target:
-                            self.result = parser.parse_node(node.value, self.node_path)
+                            self.result = parser.parse_node(
+                                node.value, self.node_path)
 
             def visit_Starred(self, node):
                 if node.value.id == target:
@@ -977,12 +1083,13 @@ class CodeParser:
             for field, value in ast.iter_fields(current_node):
                 if isinstance(value, list):
                     for item in value:
-                        if isinstance(item, ast.AST):
-                            try:
-                                if (item.lineno, item.col_offset) <= (line, offset):
-                                    next_node = item
-                            except AttributeError:
-                                pass
+                        if (isinstance(item, ast.AST)
+                                and hasattr(item, 'lineno')
+                                and hasattr(item, 'col_offset')
+                                and ((item.lineno, item.col_offset)
+                                     <= (line, offset))):
+                            next_node = item
+
                 elif isinstance(value, ast.AST):
                     try:
                         if (value.lineno, value.col_offset) <= (line, offset):
@@ -1021,14 +1128,17 @@ class CodeParser:
             def visit_Attribute(self, node):
                 if isinstance(node.value, ast.Name):
                     if node.value.id == 'self':
-                        self.results.add(Completion((node.value.attr, 'attribute')))
+                        self.results.add(Completion(
+                            (node.value.attr, 'attribute')))
 
         collector = InstanceAttrCollector()
         collector.visit(node)
         return collector.results
 
     def get_variables(self, node_path):
-        # logging.debug('get_variables({})'.format([ast.dump(node) for node in node_path]))
+        # logging.debug('get_variables({})'.format(
+        #     [ast.dump(node) for node in node_path])
+        # )
         parser = self
 
         class ScopeVariableCollector(ReversedNodeVisitor):
@@ -1106,7 +1216,6 @@ class CodeParser:
 
             @classmethod
             def collect(cls, node):
-                # logging.debug('ScopeVariableCollector: collecting {}'.format(ast.dump(node)))
                 collector = cls()
                 if isinstance(node, (ast.Lambda, ast.FunctionDef)):
                     collector.register_var(node.args.args, 'parameter')
@@ -1121,7 +1230,8 @@ class CodeParser:
         results = set()
         for node in reversed(node_path):
             if isinstance(node, (ast.Lambda, ast.FunctionDef, ast.GeneratorExp,
-                                 ast.ListComp, ast.SetComp, ast.DictComp, ast.Module)):
+                                 ast.ListComp, ast.SetComp,
+                                 ast.DictComp, ast.Module)):
                 results.update(ScopeVariableCollector.collect(node))
         return results
 
@@ -1143,7 +1253,7 @@ class CodeParser:
                     self.register_var(node.id)
 
             def visit_Attribute(self, node):
-                # print(expr_parts, self.split_attribute(node)[:-1])
+
                 if expr_parts == self.split_attribute(node)[:-1]:
                     self.register_var(node.attr)
 
@@ -1186,7 +1296,8 @@ class CodeParser:
         if expr is None or '.' not in expr:
             completions = set()
             for word in keyword.kwlist:
-                if word in ('True', 'False', 'None', 'continue', 'break', 'except'):
+                if word in ('True', 'False', 'None',
+                            'continue', 'break', 'except'):
                     completions.add(Completion((word, 'keyword')))
                 elif word in ('try', 'else', 'finally'):
                     completions.add(Completion((word + ':', 'keyword')))
@@ -1199,7 +1310,8 @@ class CodeParser:
     def get_builtins(expr=None, node_path=()):
         if expr is None or '.' not in expr:
             return {(Completion((word + '()', 'builtin'))
-                     if callable(getattr(builtins, word)) and not isinstance(getattr(builtins, word), type)
+                     if (callable(getattr(builtins, word))
+                         and not isinstance(getattr(builtins, word), type))
                      else Completion((word, 'builtin')))
                     for word in dir(builtins)
                     if '_' not in word or word in ('__debug__', '__import__')}
@@ -1213,11 +1325,15 @@ class CodeParser:
             files = glob.glob(os.path.join(os.path.join(path, *packages), '*'))
             for file in files:
                 if file.endswith(('.pyw', '.pyc', '.pyo', '.pyd')):
-                    suggests.add(Completion((os.path.split(file)[-1][:-4], 'module-name')))
+                    suggests.add(Completion(
+                        (os.path.split(file)[-1][:-4], 'module-name')))
                 elif file.endswith('.py'):
-                    suggests.add(Completion((os.path.split(file)[-1][:-3], 'module-name')))
-                elif os.path.isdir(file) and os.path.isfile(os.path.join(file, '__init__.py')):
-                    suggests.add(Completion((os.path.split(file)[-1], 'package-name')))
+                    suggests.add(Completion(
+                        (os.path.split(file)[-1][:-3], 'module-name')))
+                elif (os.path.isdir(file) and
+                      os.path.isfile(os.path.join(file, '__init__.py'))):
+                    suggests.add(Completion(
+                        (os.path.split(file)[-1], 'package-name')))
 
         return suggests
 
@@ -1236,7 +1352,6 @@ class CodeParser:
                     suggests.add(Completion((key, 'function')))
                 else:
                     suggests.add(Completion((key, 'variable')))
-            # print(suggests)
             return suggests
         except Exception:
             return set()
@@ -1247,7 +1362,8 @@ class CodeParser:
             curline = self.master.text.get("insert linestart", "insert")
             i = j = len(curline)
 
-            while i and (curline[i - 1] in self.master.identifier_chars or ord(curline[i - 1]) > 127):
+            while (i and (curline[i - 1] in self.master.identifier_chars
+                          or ord(curline[i - 1]) > 127)):
                 i -= 1
             comp_start = curline[i:j]
             if i and curline[i - 1] == '.':
@@ -1261,8 +1377,10 @@ class CodeParser:
             if '(' in comp_what:
                 return set()
 
-            comp_lists = self.master.idle_autocomplete.fetch_completions(comp_what, COMPLETE_ATTRIBUTES)
-            return {Completion((completion, 'idle')) for completion in comp_lists[1]}
+            comp_lists = self.master.idle_autocomplete.fetch_completions(
+                comp_what, COMPLETE_ATTRIBUTES)
+            return {Completion((completion, 'idle'))
+                    for completion in comp_lists[1]}
         else:
             return set()
 
@@ -1272,7 +1390,8 @@ class CodeParser:
             hyper_parser = HyperParser(self.master.window, 'insert')
             curline = self.master.text.get('insert linestart', 'insert')
             i = j = len(curline)
-            while i and (curline[i - 1] in self.master.identifier_chars or ord(curline[i - 1]) > 127):
+            while (i and (curline[i - 1] in self.master.identifier_chars
+                          or ord(curline[i - 1]) > 127)):
                 i -= 1
             if i and curline[i - 1] == '.':
                 hyper_parser.set_index("insert-%dc" % (len(curline) - (i - 1)))
@@ -1280,81 +1399,83 @@ class CodeParser:
                 return
 
             expr_string = hyper_parser.get_expression()
-            # print('expr: ', expr_string)
+
             expr = ast.parse(expr_string).body[0].value
-            # print(ast.dump(expr))
-            # print(*[ast.dump(node) for node in node_path], sep='\n')
+
             while node_path:
                 if ast_eq(node_path[-1], expr):
                     break
                 node_path.pop()
 
-            # print(*[ast.dump(node) for node in node_path], sep='\n')
             kind, obj = self.parse_node(expr, node_path)
-            # print(kind, obj)
+
             if kind == 'instance':
                 results = set()
                 for key in dir(obj) + getattr(obj, '__slots__', []):
-                    # print('Processing', key)
+
                     value = getattr(obj, key, None)
                     if isinstance(value, type):
                         results.add(Completion((key, 'class')))
                     elif isinstance(value, types.GetSetDescriptorType):
                         results.add(Completion((key, 'descriptor')))
-                    elif isinstance(obj, type) and isinstance(value, (types.MethodType, classmethod, staticmethod)):
+                    elif isinstance(obj, type) and isinstance(
+                            value, (types.MethodType, classmethod,
+                                    staticmethod)):
                         results.add(Completion((key + '()', 'method')))
                     elif callable(value):
                         results.add(Completion((key + '()', 'function')))
                     else:
                         results.add(Completion((key, 'attr')))
-                # print(results)
+
                 return results
             elif kind == 'class':
-                return self.get_variables([obj]) | self.get_instance_attrs_by_class(obj)
+                return (self.get_variables([obj])
+                        | self.get_instance_attrs_by_class(obj))
             else:
                 return set()
 
-        except (LookupError, AttributeError, SyntaxError, ValueError, TypeError):
+        except (LookupError, AttributeError, SyntaxError,
+                ValueError, TypeError):
             # traceback_gui.show_traceback()
             return set()
 
-    from_import_pattern = re.compile(r"from[ ]+(?P<module>(?:\.|\w)+)[ ]+import (\n|\w|[() ,.])+$")
+    from_import_pattern = re.compile(
+        r"from[ ]+(?P<module>(?:\.|\w)+)[ ]+import (\n|\w|[() ,.])+$")
 
     def get_suggests(self, expr):
         cursor = self.master.get_cursor()
         # expr = self.master.get_expr(self.master.text.get('1.0', cursor))
         node_path = self.get_node_path(*cursor)
         completions = set()
-        current_line = self.master.text.get('insert linestart', 'insert').strip()
+        current_line = self.master.text.get(
+            'insert linestart', 'insert').strip()
 
         if self.from_import_pattern.match(current_line):
             completions.update(self.get_from_imports(current_line))
         elif current_line.startswith(('import', 'from')):
-            # print('fetching modules')
+
             completions.update(self.get_modules(expr))
             if current_line.startswith('from'):
                 completions.add(Completion(('import ', 'keyword')))
 
         else:
             if expr is not None and '.' not in expr:
-                # print('fetching keywords')
+
                 completions.update(self.get_keywords(expr, node_path))
-                # print('fetching builtins')
+
                 completions.update(self.get_builtins(expr, node_path))
                 if len(node_path) > 0:
-                    # print('fetching variables')
                     completions.update(self.get_variables(node_path))
             elif expr is not None and '.' in expr:
-                # if len(node_path) > 1:
-                #     completions.update(self.get_attrs_and_more(expr, node_path))
-                # print('fetching attr')
                 completions.update(self.get_attrs_and_more(expr, node_path))
-                # print('fetching idle')
+
                 completions.update(self.get_idle_suggests(expr))
-            # print('fetching words')
+
             completions.update(self.get_words(expr))
 
-        return sorted(completion for completion in completions if completion.clean_content != self.fix_empty_identifier)
+        return sorted(completion
+                      for completion in completions
+                      if completion.clean_content != self.fix_empty_identifier)
 
 
 class ReversedNodeVisitor(object):
@@ -1415,7 +1536,8 @@ class Completion(tuple):
         if self_suffix_underlines != other_suffix_underlines:
             return self_suffix_underlines < other_suffix_underlines
         else:
-            return self.content[self_suffix_underlines:] < other.content[other_suffix_underlines:]
+            return (self.content[self_suffix_underlines:]
+                    < other.content[other_suffix_underlines:])
 
 
 class CodeCompletionWindow:
@@ -1442,16 +1564,24 @@ class CodeCompletionWindow:
         self.completion_list.heading('completion', text='completion')
         self.completion_list.heading('type', text='type')
 
-        color_reg = re.compile(r"^color_(?P<tag>.+)_(?P<fg_or_bg>fg|bg|foreground|background)$")
+        color_reg = re.compile(
+            r"^color_(?P<tag>.+)_(?P<fg_or_bg>fg|bg|foreground|background)$")
         for key, value in idleConf.defaultCfg['extensions'].items('MyIdleExt'):
             match = color_reg.match(key)
             if match:
-                options = {{'fg': 'foreground', 'bg': 'background'}.get(match.group('fg_or_bg'),
-                                                                        match.group('fg_or_bg')): value}
-                self.completion_list.tag_configure(match.group('tag'), **options)
+                options = {
+                    {'fg': 'foreground', 'bg': 'background'}.get(
+                        match.group('fg_or_bg'),
+                        match.group('fg_or_bg')
+                    ):
+                    value
+                }
+                self.completion_list.tag_configure(
+                    match.group('tag'), **options)
 
         self.completion_list.pack(side='left', fill='both')
-        self.scrollbar = tkinter.ttk.Scrollbar(self.window, command=self.completion_list.yview)
+        self.scrollbar = tkinter.ttk.Scrollbar(
+            self.window, command=self.completion_list.yview)
         self.completion_list['yscrollcommand'] = self.scrollbar.set
         self.scrollbar.pack(side='right', fill='y')
 
@@ -1463,12 +1593,15 @@ class CodeCompletionWindow:
         self.start_index = None
 
     def activate(self):
+
         if self.is_active:
             return
+
         self.parent_text_bind('<Up>', self.prev, add=True)
         self.parent_text_bind('<Down>', self.next, add=True)
+        self.parent_text_bind(
+            '<KeyRelease>', self.filter_completions, add=True)
         self.parent_text_bind('<Return>', self.choose, add=True)
-        self.parent_text_bind('<KeyRelease>', self.filter_completions, add=True)
         self.parent_text_bind('<BackSpace>', self.update_event, add=True)
         self.window.wm_deiconify()
 
@@ -1496,6 +1629,10 @@ class CodeCompletionWindow:
         self.update_event()
 
     def deactivate(self):
+
+        if not self.is_active:
+            return
+
         for args in self.bindings:
             self.parent.text.unbind(*args)
         self.bindings.clear()
@@ -1508,8 +1645,13 @@ class CodeCompletionWindow:
         self.is_active = False
 
     def choose(self, event):
+
+        if not self.is_active:
+            return None
+        print('choosed')
         try:
-            values = self.completion_list.item(self.completion_list.selection(), 'values')
+            values = self.completion_list.item(
+                self.completion_list.selection(), 'values')
 
             value = values[0]
             left, right, word = self.get_word()
@@ -1524,31 +1666,43 @@ class CodeCompletionWindow:
             return 'break'
 
     def update_event(self, event=None):
+
         self.window.after_idle(self.filter_completions)
 
     def filter_completions(self, event=None):
+
+        if not self.is_active:
+            return None
+        if event is not None and event.char == '\r':  # 绑定出了问题，回车键转由choose处理
+
+            # 由于这里是KeyRelease事件，text已经换行，需要先删除换行符
+            self.parent.text.delete('insert-1c', 'insert')
+            return self.choose(event)
+
         left, right, word = self.get_word()
         if left != self.start_index:
+            print('start index not match')
             self.deactivate()
-            return
+            return None
 
         try:
-            selected = self.completion_list.item(self.completion_list.selection(), 'values')[0]
+            selected = self.completion_list.item(
+                self.completion_list.selection(), 'values')[0]
         except IndexError:
             selected = (None, None)
 
         for item in self.completion_list.get_children():
             self.completion_list.delete(item)
 
-        # print(self.suggests)
         suggests = [suggest for suggest in self.suggests
                     if match_words(word, list(yield_words(suggest.content)))]
 
         suggests.sort()
         for suggest in suggests:
-            # print(suggest.type)
-            element = self.completion_list.insert('', 'end', values=suggest, tags=(suggest.type,))
-            # print(self.completion_list.item(element, 'tags'))
+
+            element = self.completion_list.insert(
+                '', 'end', values=suggest, tags=(suggest.type,))
+
             # self.completion_list.item(element, tags=(suggest.type,))
             if suggest.content == selected:
                 self.completion_list.selection_set(element)
@@ -1556,9 +1710,13 @@ class CodeCompletionWindow:
         selection = self.completion_list.selection()
         if selection == '' or selection == ():
             try:
-                self.completion_list.selection_set(self.completion_list.get_children()[0])
+                self.completion_list.selection_set(
+                    self.completion_list.get_children()[0])
             except IndexError:
                 self.deactivate()
+
+        print('finished')
+        return None
 
     def get_word(self):
         cursor = self.parent.get_cursor()
@@ -1566,24 +1724,31 @@ class CodeCompletionWindow:
         assert isinstance(this_line, str)
         left_index = cursor.column - 1
         for left_index in range(cursor.column - 1, -1, -1):
-            if not (this_line[left_index].isidentifier() or this_line[left_index].isdigit()):
+            if (not (this_line[left_index].isidentifier()
+                     or this_line[left_index].isdigit())):
                 break
         else:
             left_index -= 1
         left_index += 1
 
-        return TextIndex((cursor.row, left_index)), cursor, this_line[left_index:cursor.column]
+        return (TextIndex((cursor.row, left_index)),
+                cursor, this_line[left_index:cursor.column])
 
     def parent_text_bind(self, sequence, func=None, add=True):
-        self.bindings.append((sequence, self.parent.text.bind(sequence, func, add=add)))
+        self.bindings.append(
+            (sequence, self.parent.text.bind(sequence, func, add=add)))
 
     def prev(self, event):
+        if not self.is_active:
+            return None
         item = self.completion_list.prev(self.completion_list.selection())
         self.completion_list.selection_set(item)
         self.completion_list.see(item)
         return 'break'
 
     def next(self, event):
+        if not self.is_active:
+            return None
         selected = self.completion_list.selection()
         if selected:
             item = self.completion_list.next(self.completion_list.selection())
@@ -1591,13 +1756,16 @@ class CodeCompletionWindow:
             self.completion_list.see(item)
         else:
             try:
-                self.completion_list.selection_set(self.completion_list.get_children()[0])
+                self.completion_list.selection_set(
+                    self.completion_list.get_children()[0])
             except IndexError:
                 self.deactivate()
         return 'break'
 
 
-def yield_words(identifier, word_regex=re.compile(r"([A-Z]+_+|[a-z]+_+|[A-Z]?[a-z]*|[0-9]+|[~A-Za-z0-9_])")):
+def yield_words(identifier, word_regex=re.compile(r"([A-Z]+_+|[a-z]+_+|"
+                                                  r"[A-Z]?[a-z]*|[0-9]+|"
+                                                  r"[~A-Za-z0-9_])")):
     _words = word_regex.findall(identifier)
     for word in _words:
         if '_' in word:
@@ -1622,6 +1790,3 @@ def match_words(pattern, words):
                 return True
         else:
             return False
-
-
-# logging.basicConfig(level=logging.DEBUG)
