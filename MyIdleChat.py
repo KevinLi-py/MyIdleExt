@@ -4,21 +4,25 @@ MyIdleChat -- My Idle Extension
 This is a idle extension which provides chat service.
 """
 
-import re
-import io
-import os
-import sys
-import hashlib
-import random
-import itertools
-import socket
-import binascii
-import struct
 import base64
-import threading
+import binascii
+import enum
+import hashlib
+import io
+import itertools
 import json
 import logging
-from collections.abc import Sequence, MutableSequence
+import os
+import queue
+import random
+import re
+import socket
+import struct
+import sys
+import threading
+import time
+from collections import deque
+from collections.abc import MutableSequence
 
 version = _version_ = '0.1.0'
 
@@ -29,231 +33,16 @@ enable_editor=True
 enable_shell=False
 
 [MyIdleChat_cfgBindings]
-open-chat-window=<Ctrl-Shift-C>
+open-chat-window=<Control-Shift-C>
 """
 
-
-def on_run_as_main():
-    import shutil
-    import traceback
-    import argparse
-    import configparser
-    try:
-        from idlelib.config import idleConf
-    except ImportError:
-        from idlelib.configHandler import idleConf
-
-    def find_idlelib():
-        for path in sys.path:
-            try:
-                for directory in os.listdir(path):
-                    if (directory == 'idlelib' and
-                            os.path.isdir(os.path.join(path, directory))):
-                        config_extension_filename = os.path.join(
-                            path, directory, 'config-extensions.def')
-                        if os.path.isfile(config_extension_filename):
-                            return os.path.join(path, 'idlelib')
-            except OSError:
-                pass
-        print('`idlelib` not found. Try to specified the path of it. ')
-        sys.exit()
-
-    arg_parser = argparse.ArgumentParser('MyIdleChat', description=__doc__)
-    subparsers_group = arg_parser.add_subparsers(
-        title='Commands', dest='command', metavar='<command>')
-
-    command_install = subparsers_group.add_parser(
-        'install',
-        help='Install MyIdleChat for your idle. '
-             'You might need to restart idle to apply. '
-    )
-    command_install.add_argument(
-        '--path',
-        help='The path of idlelib to install MyIdleChat. '
-             'If is not specified, program will search it in `sys.path`. ',
-        default=''
-    )
-    command_install.add_argument('--sure', action='store_const',
-                                 const=True, default=False,
-                                 help='If it is already installed, '
-                                      'do not ask if the user want to overwrite. ')
-    which_config = command_install.add_mutually_exclusive_group()
-    which_config.add_argument('--user', action='store_const', const=['user'],
-                              dest='which_config',
-                              help='Enable for the current user. ',
-                              default=['user'])
-    which_config.add_argument('--default', action='store_const',
-                              const=['default'], dest='which_config',
-                              help='Enable for the default idle configure. ',
-                              default=['user'])
-    which_config.add_argument(
-        '--both', action='store_const',
-        const=['user', 'default'], default=['user'],
-        dest='which_config',
-        help='Enable for both the current user and the default. '
-    )
-
-    command_uninstall = subparsers_group.add_parser(
-        'uninstall', help='Uninstall MyIdleChat for your idle')
-    command_uninstall.add_argument(
-        '--path',
-        help='The path of idlelib to uninstall MyIdleChat. '
-             'If is not specified, program will search it in `sys.path`. ',
-        default=''
-    )
-    command_uninstall.add_argument(
-        '--sure', action='store_const',
-        const=True, default=False,
-        help='Do not ask if the user really want to uninstall. '
-    )
-    which_config = command_uninstall.add_mutually_exclusive_group()
-    which_config.add_argument('--user', action='store_const',
-                              const=['user'], dest='which_config',
-                              help='Disable for the current user. ',
-                              default=['user'])
-    which_config.add_argument('--default', action='store_const',
-                              const=['default'], dest='which_config',
-                              help='Disable for the default idle configure. ',
-                              default=['user'])
-    which_config.add_argument('--both', action='store_const',
-                              const=['user', 'default'], default=['user'],
-                              dest='which_config',
-                              help='Disable for both the current user'
-                                   ' and the default. ')
-
-    subparsers_group.add_parser('version',
-                                help='Show the version of MyIdleChat. ')
-
-    server_parser = subparsers_group.add_parser('server', help='Run as server. ')
-    visibility = server_parser.add_mutually_exclusive_group()
-    visibility.add_argument('--visible')
-    visibility.add_argument('--invisible')
-    server_parser.add_argument('--password')
-
-    def is_installed(idle_path):
-        return os.path.isfile(os.path.join(idle_path, 'MyIdleChat.py'))
-
-    def ask_yes_no(question):
-        while True:
-            answer = input(question + ' (y/n)> ')
-            if answer == 'y':
-                return True
-            elif answer == 'n':
-                return False
-            else:
-                print("Please input 'y' or 'n'. Try again. ")
-
-    def get_idle_ext_config_path(which):
-        if which == 'default':
-            return os.path.join(find_idlelib(), 'config-extensions.def')
-        elif which == 'user':
-            return os.path.join(idleConf.GetUserCfgDir(),
-                                'config-extensions.def')
-
-    def install(this, args):
-        if args.path == '':
-            args.path = find_idlelib()
-        if is_installed(args.path) and not args.sure:
-            if not ask_yes_no('MyIdleChat looks already installed in "{}". '
-                              'Are you sure to overwrite?'.format(args.path)):
-                print('Operation canceled. ')
-                return
-        try:
-            shutil.copy(this, os.path.join(args.path, 'MyIdleChat.py'))
-        except shutil.SameFileError:
-            pass
-        default_config = configparser.ConfigParser()
-        default_config.read_string(config_extension_def)
-
-        for which_config in args.which_config:
-            config_path = get_idle_ext_config_path(which_config)
-            idle_config = configparser.ConfigParser()
-            idle_config.read(config_path)
-            for section in default_config.sections():
-                if not idle_config.has_section(section):
-                    idle_config.add_section(section)
-                for key, value in default_config.items(section):
-                    idle_config.set(section, key, value)
-
-            with open(config_path, 'w') as fp:
-                idle_config.write(fp)
-
-        print('MyIdleChat installed successfully. ')
-
-    def uninstall(this, args):
-        if args.path == '':
-            args.path = find_idlelib()
-        if not is_installed(args.path):
-            print('MyIdleChat is not installed. ')
-            return
-        if not args.sure:
-            if not ask_yes_no('Are you sure to uninstall MyIdleChat in "{}"?'
-                                      .format(args.path)):
-                print('Operation canceled. ')
-        os.remove(os.path.join(args.path, 'MyIdleChat.py'))
-        default_config = configparser.ConfigParser()
-        default_config.read_string(config_extension_def)
-
-        for which_config in args.which_config:
-            config_path = get_idle_ext_config_path(which_config)
-            idle_config = configparser.ConfigParser()
-            idle_config.read(config_path)
-            for section in default_config.sections():
-                if idle_config.has_section(section):
-                    idle_config.remove_section(section)
-
-            with open(config_path, 'w') as fp:
-                idle_config.write(fp)
-
-        print('MyIdleChat uninstalled successfully. ')
-
-    def version(this, args):
-        print(_version_)
-
-    args = arg_parser.parse_args()
-    this = sys.argv[0]
-
-    if args.command is None:
-        print("You did not give any arguments in the command line. ")
-        print('But do not be worried -- you can input here. ')
-        print('Type `all` for all commands, `help` for help, '
-              '`<command> -h` for help with the specifiesd command, '
-              'or `quit` to quit ')
-        pattern = re.compile(r'"[^"]*"|[^ "]*')
-
-        while True:
-            command = input('command> ')
-            if command.strip() == 'all':
-                print(*subparsers_group.choices, sep='\n')
-                continue
-            if command.strip() == 'quit':
-                sys.exit()
-            if command.strip() == 'help':
-                arg_parser.print_help()
-            else:
-                try:
-                    args = arg_parser.parse_args([
-                        arg.strip('"')
-                        for arg in pattern.findall(command)
-                        if arg.strip()
-                    ])
-                    if args.command is None:
-                        print('Please input a command')
-                    else:
-                        try:
-                            locals()[args.command](this, args)
-                        except Exception:
-                            traceback.print_exc()
-                except SystemExit:
-                    pass
-
-    else:
-        locals()[args.command](this, args)
-
-
-if __name__ == '__main__' and False:
-    on_run_as_main()
-    sys.exit()
+try:
+    from editor import EditorWindow
+except ImportError:
+    from EditorWindow import EditorWindow
+from tkinter import Toplevel, Text, Pack, Grid, Place, TclError
+from tkinter.messagebox import showinfo, showwarning, showerror, askokcancel
+from tkinter.ttk import Scrollbar, Frame, Label, Button, Style, Entry
 
 
 class MyIdleChat:
@@ -263,6 +52,279 @@ class MyIdleChat:
             ("Open Chat Window", "<<open-chat-window>>"),
         ])
     ]
+
+    def __init__(self, editor: EditorWindow):
+        self.editor = editor
+        self.win = editor.top
+        self.win.bind('<<open-chat-window>>', self.open_chat_window_event)
+        self.chat_win = ChatWindow(self)
+
+    def open_chat_window_event(self, event=None):
+        self.chat_win.activate()
+
+
+class ChatWindow(Toplevel):
+    def __init__(self, master: MyIdleChat):
+        self.master = master
+        super().__init__(master.win)
+        self.is_active = False
+        self.title('My Idle Chat')
+        self.wm_protocol('WM_DELETE_WINDOW', self.deactivate)
+        self.withdraw()
+
+        self.login = LoginInterface(self)
+        self.chat = ChatInterface(self)
+        self.status_bar = StatusBar(self)
+        self.status_bar.pack(side='bottom', fill='x')
+        self.change_status('login')
+        self.sock = MySocket()
+        self.msg_queue = deque()
+        self.user = None
+        self.lock = threading.Lock()
+
+    def change_status(self, status):
+        if status == 'login':
+            try:
+                self.chat.pack_forget()
+            except TclError:
+                pass
+            try:
+                self.login.pack(side='top')
+                self.login.server_addr_input.focus_set()
+            except TclError:
+                pass
+        elif status == 'chat':
+            try:
+                self.login.pack_forget()
+            except TclError:
+                pass
+            try:
+                self.chat.pack(side='top', fill='both', expand=True)
+            except TclError:
+                pass
+            self.chat.start_chat()
+
+    def activate(self, event=None):
+        if not self.is_active:
+            self.is_active = True
+            self.deiconify()
+
+    def deactivate(self, event=None):
+        if self.state == 'chat':
+            if not askokcancel('确定离开', '确定离开聊天室吗？'):
+                return
+        if self.is_active:
+            self.is_active = False
+            self.withdraw()
+            self.sock.close()
+
+    def request(self, msg):
+        logging.debug('Requesting {}'.format(msg))
+        self.sock.set_timeout(None)
+        self.sock.send_json(msg)
+        while True:
+            try:
+                message = self.recv_message('response')
+                return message
+            except socket.timeout:
+                logging.debug('timed out')
+                pass
+
+    def recv_message(self, type_):
+        while True:
+            with self.lock:
+                try:
+                    self.sock.set_timeout(0)
+                    try:
+                        msg = self.sock.recv_any()
+                        self.msg_queue.append(msg)
+                        logging.debug('received {}'.format(msg))
+                    except BlockingIOError:
+                        time.sleep(0.1)
+                    for i, msg in enumerate(self.msg_queue):
+                        if msg['type'] == type_:
+                            del self.msg_queue[i]
+                            return msg
+                except socket.timeout:
+                    pass
+
+
+class LoginInterface(Frame):
+    def __init__(self, master: ChatWindow):
+        self.win = master
+        super().__init__(master)
+        self.server_addr_label = Label(self, text='Server Address: ')
+        self.server_addr_input = Entry(self, width=24)
+        self.user_label = Label(self, text='User: ')
+        self.user_input = Entry(self, width=24)
+        self.login_button = Button(self, text='Login', command=self.login_event)
+
+        self.server_addr_label.grid(row=0, column=0, sticky='w', padx=5, pady=5)
+        self.server_addr_input.grid(row=0, column=1, sticky='w', padx=5, pady=5)
+        self.user_label.grid(row=1, column=0, sticky='w', padx=5, pady=5)
+        self.user_input.grid(row=1, column=1, sticky='w', padx=5, pady=5)
+        self.login_button.grid(row=2, column=0, columnspan=2, sticky='ew', padx=5, pady=5)
+
+        self.server_addr_input.bind('<Return>', self.login_event)
+        self.user_input.bind('<Return>', self.login_event)
+
+    def login_event(self, event=None):
+        server_addr = self.server_addr_input.get()
+        user = self.user_input.get()
+        try:
+            ip, port = server_addr.strip().split(':')
+            port = int(port)
+        except ValueError:
+            showerror('地址无效', '服务器地址格式有误，不符合 ip:port 格式')
+            return
+
+        if self.login((ip, port), user):
+            self.win.status_bar.set_server(server_addr.strip())
+            self.win.status_bar.set_user(user)
+            self.win.change_status('chat')
+        else:
+            self.win.sock.reset()
+
+    def login(self, server_addr, user):
+        try:
+            self.win.sock.connect(server_addr)
+        except OSError as err:
+            showerror('连接失败', '无法连接至服务器：\n{}'.format(str(err)))
+            return False
+        try:
+            response = self.win.request({'type': 'login',
+                                         'user': user})
+            if response['status'] == Status.OK:
+                showinfo('登录成功', '一切正常')
+                return True
+            else:
+                showerror('登录失败', response['reason'])
+                return False
+        except (ValueError, TypeError):
+            showerror('未知错误', '解析服务器数据时发生未知错误')
+            return False
+
+
+class ChatInterface(Frame):
+    def __init__(self, master: ChatWindow):
+        self.win = master
+        super().__init__(master)
+        self.display = ScrolledText(self)
+        self.input_frame = Frame(self)
+        self.input = ScrolledText(self.input_frame, height=5)
+        self.send_button = Button(self.input_frame, command=self.send_event, text='send')
+        self.running = False
+
+        self.display.pack(side='top', fill='both', expand=True)
+        self.input_frame.pack(side='bottom', fill='both', expand=True)
+        self.input.pack(side='left', fill='both', expand=True)
+        self.send_button.pack(side='right', fill='both', ipadx=5, expand=True)
+
+        self.display.tag_configure('user', font=(None, 14), foreground='#0000dd')
+        self.display.tag_configure('self', font=(None, 14), foreground='#4444ff')
+        self.display.tag_configure('text', font=(None, 10))
+        self.display.tag_configure('sys_msg', font=(None, 10, 'bold'), foreground='#4444dd')
+        self.input.bind('<Shift-Return>', self.send_event)
+        self.display['state'] = 'disabled'
+
+    def start_chat(self):
+        self.running = True
+        threading.Thread(target=self.listen_messages).start()
+
+    def listen_messages(self):
+        while self.running:
+            msg = self.win.recv_message('receive')
+
+            from_ = msg['from']
+            type_ = msg['content']['type']
+            text = msg['content']['msg']
+            self.display['state'] = 'normal'
+            if from_ == '__system__':
+                self.display.insert('end', '系统: ', 'user')
+                self.display.insert('end', text, 'sys_msg')
+            else:
+                self.display.insert('end', from_ + ': \n', 'self' if from_ == self.win.user else 'user')
+                self.display.insert('end', text, 'text')
+            self.display.insert('end', '\n\n')
+            self.display.see('end')
+            self.display['state'] = 'disabled'
+
+    def send_event(self, event=None):
+        message = self.input.get('1.0', 'end')
+        if message.strip() == '':
+            showwarning('消息不能为空', '不可以发送空白的消息！')
+        elif self.do_send({'type': 'text', 'msg': message}):
+            self.input.delete('1.0', 'end')
+        return 'break'
+
+    def do_send(self, content):
+        try:
+            response = self.win.request({'type': 'send',
+                                         'to': '__all__',
+                                         'content': content})
+            if response['status'] == Status.OK:
+                return True
+            else:
+                return False
+        except (ValueError, TypeError):
+            showerror('未知错误', '解析服务器数据时发生未知错误')
+            return False
+
+
+class StatusBar(Frame):
+    def __init__(self, master: ChatWindow):
+        self.win = master
+        super().__init__(master, borderwidth=2)
+        self.style = Style(self)
+        self.style.configure('StatusBar.TFrame', borderwidth=1, background='#dddddd')
+        self.style.configure('StatusBar.TLabel', background='#dddddd', font=(None, 8))
+        self['style'] = 'StatusBar.TFrame'
+
+        self.info_label = Label(self, style='StatusBar.TLabel')
+        self.info_label.pack(side='left', fill='x', expand=True, padx=2)
+
+        self.server_label = Label(self, style='StatusBar.TLabel')
+        self.server_label.pack(side='right', padx=2)
+
+        self.user_label = Label(self, style='StatusBar.TLabel')
+        self.user_label.pack(side='right', padx=2)
+
+        self.set_server('<None>')
+        self.set_user('<None>')
+
+    def set_server(self, server):
+        self.server_label['text'] = 'Server: {}'.format(server)
+
+    def set_user(self, user):
+        self.win.user = user
+        self.user_label['text'] = 'User: {}'.format(user)
+
+    def set_info(self, info):
+        self.info_label['text'] = info
+
+    def clear_info(self):
+        self.info_label['text'] = ''
+
+
+class ScrolledText(Text):
+    def __init__(self, master=None, **kw):
+        self.frame = Frame(master)
+        self.vbar = Scrollbar(self.frame)
+        self.vbar.pack(side='right', fill='y')
+
+        kw.update({'yscrollcommand': self.vbar.set})
+        Text.__init__(self, self.frame, **kw)
+        self.pack(side='left', fill='both', expand=True)
+        self.vbar['command'] = self.yview
+
+        # Copy geometry methods of self.frame without overriding Text methods -- hack!
+        text_meths = vars(Text).keys()
+        methods = vars(Pack).keys() | vars(Grid).keys() | vars(Place).keys()
+        methods = methods.difference(text_meths)
+
+        for m in methods:
+            if m[0] != '_' and m != 'config' and m != 'configure':
+                setattr(self, m, getattr(self.frame, m))
 
 
 class MySocket:
@@ -275,7 +337,7 @@ class MySocket:
         self.aes = aes
         self.sent_msg_count = 0
         self.received_msg_count = 0
-        self.types = []
+        self.lock = threading.Lock()
 
     def _raw_sock_recv(self, size, sock=None):
         if sock is None:
@@ -318,7 +380,7 @@ class MySocket:
                 # The key is 256-bit, but our AES only supports 128-bit key
                 secret_key = binascii.unhexlify(hashlib.md5(binascii.unhexlify(key.encode())).hexdigest().encode())
                 logging.debug('secret key: {!r}'.format(secret_key))
-                sock.setblocking(True)
+                sock.settimeout(None)
                 return MySocket(sock, AES(bytearray(secret_key))), addr
 
     def client_handshake(self):
@@ -444,7 +506,7 @@ class MySocket:
 
     def _clean_buffer(self):
         timeout = self.get_timeout()
-        self.set_blocking(True)
+        self.set_timeout(0)
         try:
             self.sock.recv(1048576)
         except socket.error:
@@ -461,22 +523,24 @@ class MySocket:
                 self._clean_buffer()
 
     def send(self, raw_content, content_type):
-        while True:
-            sent_msg_id = self._send(raw_content, content_type, 0)
-            self.set_timeout(4)
-            try:
-                _, _, flag, received_msg_id = self._recv_safe()
-                if sent_msg_id == received_msg_id:
-                    return
-            except socket.timeout:
-                pass
+        with self.lock:
+            while True:
+                sent_msg_id = self._send(raw_content, content_type, 0)
+                self.set_timeout(4)
+                try:
+                    _, _, flag, received_msg_id = self._recv_safe()
+                    if sent_msg_id == received_msg_id:
+                        return
+                except socket.timeout:
+                    pass
 
     def recv(self):
-        while True:
-            raw_content, content_type, flag, msg_id = self._recv_safe()
-            if flag == 0:
-                self._send(b'', b'\0', 1, msg_id)
-                return raw_content, content_type
+        with self.lock:
+            while True:
+                raw_content, content_type, flag, msg_id = self._recv_safe()
+                if flag == 0:
+                    self._send(b'', b'\0', 1, msg_id)
+                    return raw_content, content_type
 
     def set_timeout(self, timeout):
         self.sock.settimeout(timeout)
@@ -484,11 +548,11 @@ class MySocket:
     def get_timeout(self):
         return self.sock.gettimeout()
 
-    def set_blocking(self, blocking):
-        self.sock.setblocking(blocking)
+    # def set_blocking(self, blocking):
+    #     self.sock.setblocking(blocking)
 
-    def get_blocking(self):
-        return self.sock.gettimeout() == 0
+    # def get_blocking(self):
+    #     return self.sock.gettimeout() == 0
 
     def send_bytes(self, value):
         self.send(value, b'b')
@@ -508,7 +572,28 @@ class MySocket:
         elif type == b'j':
             return json.loads(content.decode())
         else:
-            return content, type
+            return content
+
+    def __iter__(self):
+        self.sock.settimeout(None)
+        while True:
+            try:
+                yield self.recv_any()
+            except socket.timeout:
+                pass
+            except OSError as exc:
+                logging.debug('MySocket.__iter__: exited with {!r}'.format(exc))
+                return
+
+    def reset(self):
+        self.sock.close()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.aes = None
+        self.sent_msg_count = 0
+        self.received_msg_count = 0
+
+    def close(self):
+        self.sock.close()
 
 
 class MySocketError(RuntimeError):
@@ -517,6 +602,164 @@ class MySocketError(RuntimeError):
             return self.args[0]
         except IndexError:
             return '<no detail>'
+
+
+class Status(enum.IntEnum):
+    OK = 200
+    BAD_REQUEST = 401
+    FIELD_MISSING = 402
+    WRONG_FIELD_TYPE = 403
+    UNKNOWN_OPERATION = 404
+    NO_SUCH_USER = 411
+    USER_LOGGED_IN = 412
+    ANONYMOUS = 413
+    SERVER_ERROR = 500
+
+
+class DoubleDict(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reversed = {value: key for key, value in self.items()}
+
+    def __setitem__(self, key, value):
+        if key in self:
+            del self.reversed[self[key]]
+        super().__setitem__(key, value)
+        self.reversed[value] = key
+
+    def __delitem__(self, key):
+        del self.reversed[self[key]]
+        super().__delitem__(key)
+
+    def key_of(self, value, key=...):
+        if key is not ...:
+            if self.reversed[value] in self:
+                del self[self.reversed[value]]
+            self.reversed[value] = key
+            super().__setitem__(key, value)
+        else:
+            return self.reversed[value]
+
+
+class ChatServer:
+    def __init__(self, port):
+        self.socket = MySocket()
+        self.port = port
+        self.socket.bind(('0.0.0.0', port))
+        self.socks_users = DoubleDict()
+        self.socks_queues = {}
+        self.lock = threading.Lock()
+
+    def server_loop(self):
+        logging.info('server listening on port {} ...'.format(self.port))
+        self.socket.listen()
+        while True:
+            sock, addr = self.socket.accept()
+            logging.info('Accepted a connection from {}:{}'.format(*addr))
+            threading.Thread(target=self.serve_client, args=(sock, addr)).start()
+
+    def serve_client(self, sock: MySocket, addr):
+        self.socks_users[sock] = '__anonymous_{}_{}'.format(*addr)
+        self.socks_queues[sock] = queue.Queue()
+        logging.info('serving {} ...'.format(self.socks_users[sock]))
+        try:
+            while True:
+                try:
+                    sock.set_timeout(0)
+                    msg = sock.recv_any()
+                    logging.debug('received {} from {}'.format(msg, self.socks_users[sock]))
+                    response = self.status(Status.SERVER_ERROR)
+                    if msg['type'] == 'login':
+                        if msg['user'] in self.socks_users.values():
+                            response = self.status(Status.USER_LOGGED_IN)
+                        else:
+                            with self.lock:
+                                self.socks_users[sock] = msg['user']
+                            response = self.status(Status.OK)
+                            logging.info('{}:{} logged in as {}'.format(addr[0], addr[1], msg['user']))
+                            self.handle_event_send('__system__', {'to': '__all__',
+                                                                  'content': {'type': 'user_join',
+                                                                              'user': msg['user'],
+                                                                              'msg': 'User {} joined'.format(
+                                                                                  msg['user'])}})
+
+                    elif self.socks_users[sock].startswith('__anonymous'):
+                        response = self.status(Status.ANONYMOUS)
+                    else:
+                        if hasattr(self, 'handle_event_{}'.format(msg['type'])):
+                            response = getattr(self, 'handle_event_{}'.format(msg['type']))(self.socks_users[sock], msg)
+                        else:
+                            logging.warning('got a unknown message from {}: {!r}'.format(self.socks_users[sock], msg))
+                    sock.send_json(response)
+
+                except KeyError as exc:
+                    logging.warning('{} send a message missing field {}'.format(self.socks_users[sock],
+                                                                                exc.args[0]))
+                    response = self.status(Status.FIELD_MISSING)
+                    sock.send_json(response)
+
+                except BlockingIOError:
+                    pass
+
+                try:
+                    msg_to_send = self.socks_queues[sock].get_nowait()
+                    sock.send_json(msg_to_send)
+                except queue.Empty:
+                    pass
+
+                time.sleep(0.1)
+
+        except OSError:
+            pass
+
+        user = self.socks_users[sock]
+        self.remove_socket(sock)
+        self.handle_event_send('__system__', {'to': '__all__',
+                                              'content': {'type': 'user_leave',
+                                                          'user': user,
+                                                          'msg': 'User {} left'.format(user)}})
+
+    def remove_socket(self, sock):
+        with self.lock:
+            try:
+                sock.close()
+                logging.info('{} disconnected'.format(self.socks_users[sock]))
+                del self.socks_users[sock]
+                del self.socks_queues[sock]
+            except KeyError:
+                pass
+
+    @staticmethod
+    def status(code):
+        code = Status(code)
+        return {'type': 'response', 'status': code.value, 'reason': code.name}
+
+    def handle_event_send(self, user, msg):
+        to_users = msg['to']
+        content = msg['content']
+        if msg['to'] == '__all__':
+            to_users = list(self.socks_users.values())
+        elif not isinstance(to_users, list):
+            logging.warning('{}: message {}: Invalid to_users'.format(user, msg))
+            return self.status(Status.WRONG_FIELD_TYPE)
+
+        logging.info('{} request to send {} to {}'.format(user, content, to_users))
+
+        if user not in to_users and user in self.socks_users.values():
+            to_users.append(user)
+
+        for to_user in to_users:
+            if to_user.startswith('__'):
+                continue
+            receiver_sock = self.socks_users.key_of(to_user)
+            try:
+                self.socks_queues[receiver_sock].put({'type': 'receive',
+                                                      'from': user,
+                                                      'content': content})
+            except OSError:
+                self.remove_socket(receiver_sock)
+        logging.debug('finished handling send request')
+        return self.status(Status.OK)
 
 
 class AES:
@@ -557,7 +800,7 @@ class AES:
 
     @staticmethod
     def _MUL02(n):
-        return (((n << 1) & (0xFF)) ^ (0x1B if (n & 0x80) else 0x00))
+        return ((n << 1) & 0xFF) ^ (0x1B if (n & 0x80) else 0x00)
 
     def _MUL03(self, n):
         return self._MUL02(n) ^ n
@@ -694,7 +937,7 @@ class AES:
             s[i] = s[i] ^ k[i]
 
     @staticmethod
-    def every_bytes(n, iterable, fill=0):
+    def every_bytes(n, iterable):
         """yield every `n` elements as a bytearray"""
         iterator = iter(iterable)
         while True:
@@ -893,21 +1136,231 @@ class DiffieHellman:
             raise Exception("Bad public key from other party")
 
 
-logging.basicConfig(level=logging.INFO)
+def on_run_as_main():
+    import shutil
+    import traceback
+    import argparse
+    import configparser
+    try:
+        from idlelib.config import idleConf
+    except ImportError:
+        from idlelib.configHandler import idleConf
+
+    def find_idlelib():
+        for path in sys.path:
+            try:
+                for directory in os.listdir(path):
+                    if (directory == 'idlelib' and
+                            os.path.isdir(os.path.join(path, directory))):
+                        config_extension_filename = os.path.join(
+                            path, directory, 'config-extensions.def')
+                        if os.path.isfile(config_extension_filename):
+                            return os.path.join(path, 'idlelib')
+            except OSError:
+                pass
+        print('`idlelib` not found. Try to specified the path of it. ')
+        sys.exit()
+
+    arg_parser = argparse.ArgumentParser('MyIdleChat', description=__doc__)
+    subparsers_group = arg_parser.add_subparsers(
+        title='Commands', dest='command', metavar='<command>')
+
+    command_install = subparsers_group.add_parser(
+        'install',
+        help='Install MyIdleChat for your idle. '
+             'You might need to restart idle to apply. '
+    )
+    command_install.add_argument(
+        '--path',
+        help='The path of idlelib to install MyIdleChat. '
+             'If is not specified, program will search it in `sys.path`. ',
+        default=''
+    )
+    command_install.add_argument('--sure', action='store_const',
+                                 const=True, default=False,
+                                 help='If it is already installed, '
+                                      'do not ask if the user want to overwrite. ')
+    which_config = command_install.add_mutually_exclusive_group()
+    which_config.add_argument('--user', action='store_const', const=['user'],
+                              dest='which_config',
+                              help='Enable for the current user. ',
+                              default=['user'])
+    which_config.add_argument('--default', action='store_const',
+                              const=['default'], dest='which_config',
+                              help='Enable for the default idle configure. ',
+                              default=['user'])
+    which_config.add_argument(
+        '--both', action='store_const',
+        const=['user', 'default'], default=['user'],
+        dest='which_config',
+        help='Enable for both the current user and the default. '
+    )
+
+    command_uninstall = subparsers_group.add_parser(
+        'uninstall', help='Uninstall MyIdleChat for your idle')
+    command_uninstall.add_argument(
+        '--path',
+        help='The path of idlelib to uninstall MyIdleChat. '
+             'If is not specified, program will search it in `sys.path`. ',
+        default=''
+    )
+    command_uninstall.add_argument(
+        '--sure', action='store_const',
+        const=True, default=False,
+        help='Do not ask if the user really want to uninstall. '
+    )
+    which_config = command_uninstall.add_mutually_exclusive_group()
+    which_config.add_argument('--user', action='store_const',
+                              const=['user'], dest='which_config',
+                              help='Disable for the current user. ',
+                              default=['user'])
+    which_config.add_argument('--default', action='store_const',
+                              const=['default'], dest='which_config',
+                              help='Disable for the default idle configure. ',
+                              default=['user'])
+    which_config.add_argument('--both', action='store_const',
+                              const=['user', 'default'], default=['user'],
+                              dest='which_config',
+                              help='Disable for both the current user'
+                                   ' and the default. ')
+
+    subparsers_group.add_parser('version',
+                                help='Show the version of MyIdleChat. ')
+
+    server_parser = subparsers_group.add_parser('server', help='Run as server. ')
+    server_parser.add_argument('--port', help='The tcp port', default=2020, type=int)
+
+    # visibility = server_parser.add_mutually_exclusive_group()
+    # visibility.add_argument('--visible')
+    # visibility.add_argument('--invisible')
+
+    def is_installed(idle_path):
+        return os.path.isfile(os.path.join(idle_path, 'MyIdleChat.py'))
+
+    def ask_yes_no(question):
+        while True:
+            answer = input(question + ' (y/n)> ')
+            if answer == 'y':
+                return True
+            elif answer == 'n':
+                return False
+            else:
+                print("Please input 'y' or 'n'. Try again. ")
+
+    def get_idle_ext_config_path(which):
+        if which == 'default':
+            return os.path.join(find_idlelib(), 'config-extensions.def')
+        elif which == 'user':
+            return os.path.join(idleConf.GetUserCfgDir(),
+                                'config-extensions.def')
+
+    def install(this, args):
+        if args.path == '':
+            args.path = find_idlelib()
+        if is_installed(args.path) and not args.sure:
+            if not ask_yes_no('MyIdleChat looks already installed in "{}". '
+                              'Are you sure to overwrite?'.format(args.path)):
+                print('Operation canceled. ')
+                return
+        try:
+            shutil.copy(this, os.path.join(args.path, 'MyIdleChat.py'))
+        except shutil.SameFileError:
+            pass
+        default_config = configparser.ConfigParser()
+        default_config.read_string(config_extension_def)
+
+        for which_config in args.which_config:
+            config_path = get_idle_ext_config_path(which_config)
+            idle_config = configparser.ConfigParser()
+            idle_config.read(config_path)
+            for section in default_config.sections():
+                if not idle_config.has_section(section):
+                    idle_config.add_section(section)
+                for key, value in default_config.items(section):
+                    idle_config.set(section, key, value)
+
+            with open(config_path, 'w') as fp:
+                idle_config.write(fp)
+
+        print('MyIdleChat installed successfully. ')
+
+    def uninstall(this, args):
+        if args.path == '':
+            args.path = find_idlelib()
+        if not is_installed(args.path):
+            print('MyIdleChat is not installed. ')
+            return
+        if not args.sure:
+            if not ask_yes_no('Are you sure to uninstall MyIdleChat in "{}"?'
+                                      .format(args.path)):
+                print('Operation canceled. ')
+        os.remove(os.path.join(args.path, 'MyIdleChat.py'))
+        default_config = configparser.ConfigParser()
+        default_config.read_string(config_extension_def)
+
+        for which_config in args.which_config:
+            config_path = get_idle_ext_config_path(which_config)
+            idle_config = configparser.ConfigParser()
+            idle_config.read(config_path)
+            for section in default_config.sections():
+                if idle_config.has_section(section):
+                    idle_config.remove_section(section)
+
+            with open(config_path, 'w') as fp:
+                idle_config.write(fp)
+
+        print('MyIdleChat uninstalled successfully. ')
+
+    def version(this, args):
+        print(_version_)
+
+    def server(this, args):
+        port = args.port
+        chat_server = ChatServer(port=port)
+        chat_server.server_loop()
+
+    args = arg_parser.parse_args()
+    this = sys.argv[0]
+
+    if args.command is None:
+        print("You did not give any arguments in the command line. ")
+        print('But do not be worried -- you can input here. ')
+        print('Type `all` for all commands, `help` for help, '
+              '`<command> -h` for help with the specifiesd command, '
+              'or `quit` to quit ')
+        pattern = re.compile(r'"[^"]*"|[^ "]*')
+
+        while True:
+            command = input('command> ')
+            if command.strip() == 'all':
+                print(*subparsers_group.choices, sep='\n')
+                continue
+            if command.strip() == 'quit':
+                sys.exit()
+            if command.strip() == 'help':
+                arg_parser.print_help()
+            else:
+                try:
+                    args = arg_parser.parse_args([
+                        arg.strip('"')
+                        for arg in pattern.findall(command)
+                        if arg.strip()
+                    ])
+                    if args.command is None:
+                        print('Please input a command')
+                    else:
+                        try:
+                            locals()[args.command](this, args)
+                        except Exception:
+                            traceback.print_exc()
+                except SystemExit:
+                    pass
+
+    else:
+        locals()[args.command](this, args)
 
 
-debug = True
-if debug:
-    def server_code():
-        server = MySocket()
-        server.bind(('0.0.0.0', 2020))
-        server.listen()
-        client, addr = server.accept()
-        client.send(b'received ' + client.recv()[0], b'b')
-
-    def client_code():
-        client = MySocket()
-        # client.bind(('127.0.0.1', 2021))
-        client.connect(('192.168.54.41', 2020))
-        client.send(b'hello server!', b'b')
-        print(client.recv()[0])
+logging.basicConfig(level=logging.DEBUG)
+if __name__ == '__main__':
+    on_run_as_main()
+    sys.exit()
