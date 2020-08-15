@@ -8,25 +8,25 @@ In this way, it will provide the features mentioned above.
 Otherwise, if you run this file as `__main__` (Run directly),
 you can do some operations such as install and uninstall.
 """
-import logging
-import traceback
-import io
-import types
+import ast
 import builtins
-import keyword
-from code import InteractiveInterpreter
 import glob
 import inspect
-import ast
-import tempfile
-import tkinter.ttk
-import tkinter.messagebox
-import tkinter
-import random
-import string
-import re
+import io
+import keyword
+import logging
 import os
+import random
+import re
+import string
 import sys
+import tempfile
+import tkinter
+import tkinter.messagebox
+import tkinter.ttk
+import traceback
+import types
+from code import InteractiveInterpreter
 
 version = _version_ = '0.3.0'
 
@@ -45,6 +45,7 @@ color_module_fg = #d6d600
 color_function_fg = #c8c800
 color_parameter_fg = #000000
 color_variable_fg = #000000
+color_path_fg = #00aa00
 
 [MyIdleExt_cfgBindings]
 format-pep8=<Control-l>
@@ -84,18 +85,18 @@ def on_run_as_main():
     command_install = subparsers_group.add_parser(
         'install',
         help='Install MyIdleExt for your idle. '
-        'You might need to restart idle to apply. '
+             'You might need to restart idle to apply. '
     )
     command_install.add_argument(
         '--path',
         help='The path of idlelib to install MyIdleExt. '
-        'If is not specified, program will search it in `sys.path`. ',
+             'If is not specified, program will search it in `sys.path`. ',
         default=''
     )
     command_install.add_argument('--sure', action='store_const',
                                  const=True, default=False,
                                  help='If it is already installed, '
-                                 'do not ask if the user want to overwrite. ')
+                                      'do not ask if the user want to overwrite. ')
     which_config = command_install.add_mutually_exclusive_group()
     which_config.add_argument('--user', action='store_const', const=['user'],
                               dest='which_config',
@@ -117,7 +118,7 @@ def on_run_as_main():
     command_uninstall.add_argument(
         '--path',
         help='The path of idlelib to uninstall MyIdleExt. '
-        'If is not specified, program will search it in `sys.path`. ',
+             'If is not specified, program will search it in `sys.path`. ',
         default=''
     )
     command_uninstall.add_argument(
@@ -201,7 +202,7 @@ def on_run_as_main():
             return
         if not args.sure:
             if not ask_yes_no('Are you sure to uninstall MyIdleExt in "{}"?'
-                              .format(args.path)):
+                                      .format(args.path)):
                 print('Operation canceled. ')
         os.remove(os.path.join(args.path, 'MyIdleExt.py'))
         default_config = configparser.ConfigParser()
@@ -268,7 +269,6 @@ if __name__ == '__main__':
     on_run_as_main()
     sys.exit()
 
-
 try:
     from idlelib.config import idleConf
 except ImportError:
@@ -282,13 +282,15 @@ except ImportError:
 has_idle_autocomplete = True
 try:
     from idlelib.autocomplete import (AutoComplete, HyperParser,
-                                      ATTRS as COMPLETE_ATTRIBUTES)
+                                      ATTRS as COMPLETE_ATTRIBUTES,
+                                      FILES as COMPLETE_FILES)
     from idlelib import autocomplete
 except ImportError:
     try:
         from idlelib.AutoComplete import (AutoComplete,
                                           HyperParser,
-                                          COMPLETE_ATTRIBUTES)
+                                          COMPLETE_ATTRIBUTES,
+                                          COMPLETE_FILES)
         from idlelib import AutoComplete as autocomplete
     except ImportError:
         has_idle_autocomplete = False
@@ -715,6 +717,10 @@ class MyIdleExt:
             traceback.print_exc()
 
     def handle_key(self, event):
+        cursor = self.get_cursor()
+        if self.position_in_tags(cursor, ('STRING',)):
+            if event.char not in r'\/*?"<>|':
+                self.text.after_idle(self.open_filename_completion)
 
         if event.char == '':
             return
@@ -725,9 +731,11 @@ class MyIdleExt:
         if event.char == '\r':
             return self.window.newline_and_indent_event(event)
 
+        if event.char == '\t':
+            self.handle_tab(event)
+
         if event.char in string.ascii_letters or event.char == '.':
-            cursor = self.get_cursor()
-            if self.position_in_tags(cursor):
+            if self.position_in_tags(cursor, ('COMMENT', 'STRING')):
                 return
 
             self.text.after_idle(self.open_completion)
@@ -736,6 +744,7 @@ class MyIdleExt:
             #     return 'break'
 
     def handle_tab(self, event):
+        # print('tab')
         cursor = self.get_cursor()
         text_before = self.text.get(cursor.line_start, cursor).strip()
         if text_before != '' and (self.completion.get_word() != ''
@@ -768,6 +777,41 @@ class MyIdleExt:
         except Exception:
             traceback.print_exc()
 
+    def open_filename_completion(self, event=None):
+        # print('filename')
+        cursor = self.get_cursor()
+        start = cursor.column
+        current_line = self.text.get(cursor.line_start, cursor.line_end)
+        try:
+            for start in range(cursor.column - 1, -1, -1):
+                if current_line[start] in r'''*?'"<>|''':
+                    start += 1
+                    break
+            else:
+                start = 0
+        except IndexError:
+            start = 0
+        # print(start, cursor.column)
+
+        prefix = current_line[start:cursor.column]
+        dir_name = os.path.dirname(prefix)
+
+        paths = [os.path.dirname(filename) for filename in self.window.flist.inversedict.values()
+                 if filename is not None]
+        paths.append(os.getcwd())
+        paths.append('')  # for root dir
+
+        # print(prefix, dir_name, paths)
+        completions = set()
+        for path in paths:
+            try:
+                if os.path.exists(os.path.join(path, dir_name)):
+                    files = os.listdir(os.path.join(path, dir_name))
+                    completions.update({Completion((file, 'path')) for file in files})
+            except OSError:
+                pass
+        self.completion.suggests = completions
+        self.completion.activate(mode='files')
 
 def ast_eq(left, right):
     if not isinstance(left, ast.AST) or not isinstance(right, ast.AST):
@@ -1042,6 +1086,16 @@ class CodeParser:
                     if (name.name or name.asname) == target:
                         self.result = 'instance', parser.handle_fromimport(
                             node.module, name.name)
+                    elif name.name == '*':
+                        module = parser.handle_import(node.module)
+                        if module is None:
+                            continue
+                        if ((hasattr(module, '__all__')
+                             and target in module.__all__
+                             and hasattr(module, target))
+                                or (not target.startswith('_')
+                                    and hasattr(module, target))):
+                            self.result = 'instance', getattr(module, target)
 
             def visit_FunctionDef(self, node):
                 if node.name == target:
@@ -1069,6 +1123,8 @@ class CodeParser:
             result = visitor.result
             if result is not None and result[0] is not None:
                 return result
+        if hasattr(builtins, target):
+            return 'instance', getattr(builtins, target)
         return None, None
 
     def get_node_path(self, line, offset):
@@ -1126,7 +1182,7 @@ class CodeParser:
                 if isinstance(node.value, ast.Name):
                     if node.value.id == 'self':
                         self.results.add(Completion(
-                            (node.value.attr, 'attribute')))
+                            (node.value.attr, 'attr')))
 
         collector = InstanceAttrCollector()
         collector.visit(node)
@@ -1163,7 +1219,14 @@ class CodeParser:
 
             def visit_ImportFrom(self, node):
                 for name in node.names:
-                    self.register_var(name.asname or name.name)
+                    if name.name != '*':
+                        self.register_var(name.asname or name.name)
+                    else:
+                        module = parser.handle_import(node.module)
+                        if hasattr(module, '__all__'):
+                            self.register_var(module.__all__)
+                        else:
+                            self.register_var(name for name in dir(module) if not name.startswith('_'))
 
             def visit_ExceptHandler(self, node):
                 self.results.add(node.name)
@@ -1185,10 +1248,9 @@ class CodeParser:
                 self.register_var(node.name, 'class')
 
             def register_var(self, name, kind='variable'):
-
                 if name is None:
                     return
-                if isinstance(name, (list, tuple)):
+                if isinstance(name, (list, tuple, types.GeneratorType)):
                     for n in name:
                         self.register_var(n, kind)
                 elif isinstance(name, ast.arg):
@@ -1233,60 +1295,19 @@ class CodeParser:
         return results
 
     def get_words(self, expr=None, node_path=()):
-        parser = self
+        results = set()
         expr_parts = expr.strip('()[]{}"\'').split('.')
         try:
             expr_last = expr_parts[-1]
         except IndexError:
             expr_last = ''
         expr_parts = expr_parts[:-1]
-
-        class WordCollector(ast.NodeVisitor):
-            def __init__(self):
-                self.results = set()
-
-            def visit_Name(self, node):
-                if len(expr_parts) == 0:
-                    self.register_var(node.id)
-
-            def visit_Attribute(self, node):
-
-                if expr_parts == self.split_attribute(node)[:-1]:
-                    self.register_var(node.attr)
-
-            @staticmethod
-            def split_attribute(node):
-                current_node = node
-                parts = []
-                while True:
-                    if isinstance(current_node, ast.Name):
-                        parts.append(current_node.id)
-                        break
-                    elif isinstance(current_node, ast.Attribute):
-                        parts.append(current_node.attr)
-                        current_node = current_node.value
-                    else:
-                        break
-                return parts[::-1]
-
-            def register_var(self, name, type='abc'):
-                if name is None:
-                    return
-                if isinstance(name, (list, tuple)):
-                    for n in name:
-                        if name != expr_last:
-                            self.results.add(Completion((n, type)))
-                else:
-                    if name != expr_last:
-                        self.results.add(Completion((name, type)))
-
-            @classmethod
-            def collect(cls, tree):
-                collector = cls()
-                collector.visit(tree)
-                return collector.results
-
-        return WordCollector.collect(self.tree)
+        all_text = self.master.text.get('1.0', 'end')
+        pattern = re.compile(r"(?<![a-zA-Z0-9_.]){}[a-zA-Z0-9_]+".format(re.escape('.'.join(expr_parts) + '.')))
+        # print(pattern)
+        for string in pattern.findall(all_text):
+            results.add(Completion((string.split('.')[-1], 'abc')))
+        return results
 
     @staticmethod
     def get_keywords(expr=None, node_path=()):
@@ -1331,6 +1352,8 @@ class CodeParser:
                       os.path.isfile(os.path.join(file, '__init__.py'))):
                     suggests.add(Completion(
                         (os.path.split(file)[-1], 'package-name')))
+        if len(packages) == 0:
+            suggests.update({Completion((module, 'module-name')) for module in sys.builtin_module_names})
 
         return suggests
 
@@ -1560,6 +1583,7 @@ class CodeCompletionWindow:
         self.completion_list.column('type', width=120, anchor='e')
         self.completion_list.heading('completion', text='completion')
         self.completion_list.heading('type', text='type')
+        self.completion_list.bind('<Double-Button-1>', self.choose)
 
         color_reg = re.compile(
             r"^color_(?P<tag>.+)_(?P<fg_or_bg>fg|bg|foreground|background)$")
@@ -1571,7 +1595,7 @@ class CodeCompletionWindow:
                         match.group('fg_or_bg'),
                         match.group('fg_or_bg')
                     ):
-                    value
+                        value
                 }
                 self.completion_list.tag_configure(
                     match.group('tag'), **options)
@@ -1589,11 +1613,11 @@ class CodeCompletionWindow:
         self.suggests = []
         self.start_index = None
 
-    def activate(self):
+    def activate(self, mode='code'):
 
         if self.is_active:
             return
-
+        self.mode = mode
         self.parent_text_bind('<Up>', self.prev, add=True)
         self.parent_text_bind('<Down>', self.next, add=True)
         self.parent_text_bind(
@@ -1641,18 +1665,22 @@ class CodeCompletionWindow:
 
         self.is_active = False
 
+        self.parent.text.bind('<Tab>', self.parent.handle_tab, add=True)  # 未知原因，tab键绑定丢失，需要重新绑定
+
     def choose(self, event):
 
         if not self.is_active:
             return None
-        print('choosed')
+        # print('choosed')
         try:
             values = self.completion_list.item(
                 self.completion_list.selection(), 'values')
 
             value = values[0]
             left, right, word = self.get_word()
-
+            if left != self.start_index:
+                self.deactivate()
+                return
             self.parent.text.delete(left, right)
             self.parent.text.insert('insert', value)
             if value.endswith('()'):
@@ -1670,15 +1698,19 @@ class CodeCompletionWindow:
 
         if not self.is_active:
             return None
+
         if event is not None and event.char == '\r':  # 绑定出了问题，回车键转由choose处理
 
             # 由于这里是KeyRelease事件，text已经换行，需要先删除换行符
             self.parent.text.delete('insert-1c', 'insert')
             return self.choose(event)
 
+        # if event is not None and event.char == '\t':
+        #     print('Tab is here!')
+
         left, right, word = self.get_word()
         if left != self.start_index:
-            print('start index not match')
+            # print('start index not match')
             self.deactivate()
             return None
 
@@ -1712,20 +1744,26 @@ class CodeCompletionWindow:
             except IndexError:
                 self.deactivate()
 
-        print('finished')
+        # print('finished')
         return None
 
     def get_word(self):
         cursor = self.parent.get_cursor()
         this_line = self.parent.text.get(join_index(cursor.row, 0), cursor)
-        assert isinstance(this_line, str)
         left_index = cursor.column - 1
-        for left_index in range(cursor.column - 1, -1, -1):
-            if (not (this_line[left_index].isidentifier()
-                     or this_line[left_index].isdigit())):
-                break
+        if self.mode == 'code':
+            for left_index in range(cursor.column - 1, -1, -1):
+                if (not (this_line[left_index].isidentifier()
+                         or this_line[left_index].isdigit())):
+                    break
+            else:
+                left_index -= 1
         else:
-            left_index -= 1
+            for left_index in range(cursor.column - 1, -1, -1):
+                if (this_line[left_index] in r'\/*?"<>|'):
+                    break
+            else:
+                left_index -= 1
         left_index += 1
 
         return (TextIndex((cursor.row, left_index)),
@@ -1769,6 +1807,10 @@ def yield_words(identifier, word_regex=re.compile(r"([A-Z]+_+|[a-z]+_+|"
             underlines_begin = word.index('_')
             yield word[:underlines_begin]
             yield word[underlines_begin:]
+        elif ' ' in word:
+            space_begin = word.index(' ')
+            yield word[:space_begin]
+            yield word[space_begin:]
         elif word != '':
             yield word
 
@@ -1787,3 +1829,5 @@ def match_words(pattern, words):
                 return True
         else:
             return False
+
+# logging.basicConfig(level=logging.DEBUG)
